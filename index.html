@@ -231,7 +231,7 @@
         <div
           id="thresholdMarker"
           class="absolute top-0 bottom-0 w-0.5 bg-white shadow-[0_0_8px_rgba(255,255,255,0.9)] pointer-events-none"
-          style="left: 72%"
+          style="left: 45%"
         ></div>
       </div>
 
@@ -239,7 +239,7 @@
       <div>
         <div class="flex items-center justify-between text-xs mb-1.5">
           <label for="thresholdSlider" class="font-semibold text-slate-300">Detection Threshold</label>
-          <span id="thresholdValue" class="font-mono font-bold text-emerald-400">72 dB</span>
+          <span id="thresholdValue" class="font-mono font-bold text-emerald-400">45 dB</span>
         </div>
         <input
           id="thresholdSlider"
@@ -247,7 +247,7 @@
           min="35"
           max="95"
           step="1"
-          value="72"
+          value="45"
           class="ios-slider w-full"
         />
         <div class="flex justify-between text-[10px] text-slate-500 mt-1">
@@ -408,7 +408,7 @@
       // Configuration & Constants
       // =========================================================================
       const STORAGE_KEYS = {
-        THRESHOLD: 'fartcount_threshold_v4',
+        THRESHOLD: 'fartcount_threshold_v4_2',
       };
 
       const DB_NAME = 'FartCountHighlightDB';
@@ -431,7 +431,7 @@
           longestFart: 0, // seconds
           loudestFart: 0, // dB (0-100 scale)
         },
-        thresholdDB: 72,
+        thresholdDB: 45,
         clips: [],        // Array of { id, timestamp, duration, peakDB, starred, blob, url }
         sortBy: 'newest', // 'newest' | 'favorites' | 'longest' | 'loudest'
 
