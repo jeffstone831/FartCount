@@ -125,7 +125,7 @@
         <div class="truncate">
           <div class="flex items-center gap-1.5">
             <h1 class="text-xl font-extrabold tracking-tight leading-tight">FartCount</h1>
-            <span class="px-1.5 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">v0.2</span>
+            <span class="px-1.5 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">v0.3</span>
           </div>
           <p class="text-[11px] font-medium text-slate-400">Acoustic Highlight Tracker</p>
         </div>
@@ -396,10 +396,10 @@
 
   <script>
     /**
-     * FartCount Web App v0.2 — Fast-Transient PCM-to-WAV Highlight Reel Edition
+     * FartCount Web App v0.3 — Fast-Transient PCM-to-WAV Highlight Reel + Native WAV Share Edition
      * Captures individual fart clips (down to 50ms quick pops) with a ~0.25s pre-roll buffer,
-     * encodes to 16-bit mono WAV, persists clips & favorites in IndexedDB, and supports
-     * smooth loudspeaker playback on iOS Safari & desktop browsers.
+     * encodes to 16-bit mono WAV, persists clips & favorites in IndexedDB, shares WAV + rich stats,
+     * and supports smooth loudspeaker playback on iOS Safari & desktop browsers.
      */
     (function () {
       'use strict';
@@ -557,35 +557,63 @@
         return `${mins}:${secs}`;
       }
 
+      function formatClipDuration(seconds) {
+        const ms = Math.round(seconds * 1000);
+        if (ms < 1000) {
+          return `${ms}ms`;
+        }
+        return `${seconds.toFixed(2)}s`;
+      }
+
+      function getClipFilename(clip) {
+        const durTag = formatClipDuration(clip.duration);
+        const dbTag = `${Math.round(clip.peakDB)}dB`;
+        return `FartCount_${durTag}_${dbTag}.wav`;
+      }
+
+      function copyTextToClipboard(text) {
+        try {
+          const textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.setAttribute('readonly', '');
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.focus();
+          textarea.select();
+          const ok = document.execCommand('copy');
+          document.body.removeChild(textarea);
+          return ok;
+        } catch {
+          return false;
+        }
+      }
+
       function formatTimestamp(isoString) {
         try {
           const date = new Date(isoString);
-          const now = new Date();
-          const isToday = date.toDateString() === now.toDateString();
-          const timeStr = date.toLocaleTimeString([], {
+          return date.toLocaleString(undefined, {
+            month: 'short',
+            day: 'numeric',
             hour: 'numeric',
             minute: '2-digit',
-            second: '2-digit',
           });
-          if (isToday) return `Today at ${timeStr}`;
-          const dateStr = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-          return `${dateStr} • ${timeStr}`;
         } catch {
           return 'Just now';
         }
       }
 
-      function flashStatCard(cardEl, ringClass) {
-        cardEl.classList.add('ring-2', ringClass, 'scale-[1.03]');
+      function flashStatCard(cardEl, colorRingClass) {
+        cardEl.classList.add('scale-[1.04]', colorRingClass);
         setTimeout(() => {
-          cardEl.classList.remove('ring-2', ringClass, 'scale-[1.03]');
+          cardEl.classList.remove('scale-[1.04]', colorRingClass);
         }, 420);
       }
 
       // =========================================================================
       // LocalStorage Persistence (Stats & Threshold)
       // =========================================================================
-      function loadPreferences() {
+      function loadLocalSettings() {
         try {
           const savedStats = localStorage.getItem(STORAGE_KEYS.STATS);
           if (savedStats) {
@@ -602,7 +630,7 @@
             }
           }
         } catch (err) {
-          console.warn('Could not load saved preferences:', err);
+          console.warn('Could not read localStorage:', err);
         }
       }
 
@@ -622,23 +650,14 @@
         }
       }
 
-      function renderStats() {
-        els.statTotal.textContent = String(state.stats.totalFarts);
-        els.statLongest.textContent = `${state.stats.longestFart.toFixed(2)}s`;
-        els.statLoudest.textContent = `${Math.round(state.stats.loudestFart)} dB`;
-      }
-
-      function renderThresholdUI() {
-        els.thresholdSlider.value = String(state.thresholdDB);
-        els.thresholdValue.textContent = `${state.thresholdDB} dB`;
-        els.thresholdMarker.style.left = `${state.thresholdDB}%`;
-      }
-
       // =========================================================================
-      // IndexedDB Persistence for WAV Highlight Clips
+      // IndexedDB Persistence (Individual WAV Highlight Clips)
       // =========================================================================
-      function openDatabase() {
-        return new Promise((resolve, reject) => {
+      let dbPromise = null;
+
+      function openHighlightDB() {
+        if (dbPromise) return dbPromise;
+        dbPromise = new Promise((resolve, reject) => {
           if (!('indexedDB' in window)) {
             reject(new Error('IndexedDB not supported'));
             return;
@@ -650,120 +669,93 @@
               db.createObjectStore(STORE_NAME, { keyPath: 'id' });
             }
           };
-          request.onsuccess = (event) => resolve(event.target.result);
-          request.onerror = (event) => reject(event.target.error);
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
         });
+        return dbPromise;
       }
 
-      async function saveClipToDB(clipRecord) {
+      async function saveClipToDB(clip) {
         try {
-          const db = await openDatabase();
-          return new Promise((resolve, reject) => {
+          const db = await openHighlightDB();
+          return await new Promise((resolve, reject) => {
             const tx = db.transaction(STORE_NAME, 'readwrite');
             tx.objectStore(STORE_NAME).put({
-              id: clipRecord.id,
-              timestamp: clipRecord.timestamp,
-              duration: clipRecord.duration,
-              peakDB: clipRecord.peakDB,
-              starred: Boolean(clipRecord.starred),
-              blob: clipRecord.blob,
+              id: clip.id,
+              timestamp: clip.timestamp,
+              duration: clip.duration,
+              peakDB: clip.peakDB,
+              starred: Boolean(clip.starred),
+              blob: clip.blob,
             });
             tx.oncomplete = () => resolve();
-            tx.onerror = (e) => reject(e.target.error);
+            tx.onerror = () => reject(tx.error);
           });
         } catch (err) {
-          console.warn('IndexedDB save failed:', err);
+          console.warn('Failed to save clip to IndexedDB:', err);
         }
       }
 
       async function loadClipsFromDB() {
         try {
-          const db = await openDatabase();
-          return new Promise((resolve, reject) => {
+          const db = await openHighlightDB();
+          const records = await new Promise((resolve, reject) => {
             const tx = db.transaction(STORE_NAME, 'readonly');
             const req = tx.objectStore(STORE_NAME).getAll();
-            req.onsuccess = () => {
-              const items = (req.result || []).map((item) => ({
-                ...item,
-                starred: Boolean(item.starred),
-                url: item.blob ? URL.createObjectURL(item.blob) : '',
-              }));
-              items.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-              resolve(items);
-            };
-            req.onerror = (e) => reject(e.target.error);
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
           });
+
+          state.clips = records
+            .filter((r) => r && r.blob)
+            .map((r) => ({
+              id: r.id,
+              timestamp: r.timestamp,
+              duration: Number(r.duration) || 0,
+              peakDB: Number(r.peakDB) || 0,
+              starred: Boolean(r.starred),
+              blob: r.blob,
+              url: URL.createObjectURL(r.blob),
+            }));
         } catch (err) {
-          console.warn('IndexedDB load failed:', err);
-          return [];
+          console.warn('Failed to load clips from IndexedDB:', err);
+          state.clips = [];
         }
       }
 
       async function deleteClipFromDB(clipId) {
         try {
-          const db = await openDatabase();
-          return new Promise((resolve, reject) => {
+          const db = await openHighlightDB();
+          return await new Promise((resolve, reject) => {
             const tx = db.transaction(STORE_NAME, 'readwrite');
             tx.objectStore(STORE_NAME).delete(clipId);
             tx.oncomplete = () => resolve();
-            tx.onerror = (e) => reject(e.target.error);
+            tx.onerror = () => reject(tx.error);
           });
         } catch (err) {
-          console.warn('IndexedDB delete failed:', err);
+          console.warn('Failed to delete clip from IndexedDB:', err);
         }
       }
 
       async function clearAllClipsFromDB() {
         try {
-          const db = await openDatabase();
-          return new Promise((resolve, reject) => {
+          const db = await openHighlightDB();
+          return await new Promise((resolve, reject) => {
             const tx = db.transaction(STORE_NAME, 'readwrite');
             tx.objectStore(STORE_NAME).clear();
             tx.oncomplete = () => resolve();
-            tx.onerror = (e) => reject(e.target.error);
+            tx.onerror = () => reject(tx.error);
           });
         } catch (err) {
-          console.warn('IndexedDB clear failed:', err);
+          console.warn('Failed to clear IndexedDB:', err);
         }
       }
 
       // =========================================================================
-      // PCM Ring Buffer & 16-bit Mono WAV Encoder
+      // 16-bit Mono PCM -> WAV Encoder
       // =========================================================================
-      function pushToPreRoll(chunk) {
-        const maxPreRollSamples = Math.ceil(PRE_ROLL_SECONDS * state.sampleRate);
-        state.preRollChunks.push(chunk);
-        state.preRollSamples += chunk.length;
-
-        while (state.preRollSamples > maxPreRollSamples && state.preRollChunks.length > 1) {
-          const removed = state.preRollChunks.shift();
-          state.preRollSamples -= removed.length;
-        }
-      }
-
-      function mergeFloat32Chunks(chunks, maxSamples) {
-        let totalLength = 0;
-        for (let i = 0; i < chunks.length; i++) {
-          totalLength += chunks[i].length;
-        }
-        const finalLength = maxSamples ? Math.min(totalLength, maxSamples) : totalLength;
-        const result = new Float32Array(finalLength);
-        let offset = 0;
-        for (let i = 0; i < chunks.length && offset < finalLength; i++) {
-          const remaining = finalLength - offset;
-          if (chunks[i].length <= remaining) {
-            result.set(chunks[i], offset);
-            offset += chunks[i].length;
-          } else {
-            result.set(chunks[i].subarray(0, remaining), offset);
-            offset += remaining;
-          }
-        }
-        return result;
-      }
-
-      function encodeMonoWAV(samples, sampleRate) {
-        const buffer = new ArrayBuffer(44 + samples.length * 2);
+      function encodeWavBlob(float32Chunks, totalSamples, sampleRate) {
+        const buffer = new ArrayBuffer(44 + totalSamples * 2);
         const view = new DataView(buffer);
 
         function writeString(offset, str) {
@@ -772,216 +764,419 @@
           }
         }
 
-        // RIFF chunk descriptor
+        // RIFF / WAVE Header
         writeString(0, 'RIFF');
-        view.setUint32(4, 36 + samples.length * 2, true);
+        view.setUint32(4, 36 + totalSamples * 2, true);
         writeString(8, 'WAVE');
-
-        // fmt sub-chunk
         writeString(12, 'fmt ');
-        view.setUint32(16, 16, true); // PCM
-        view.setUint16(20, 1, true);  // AudioFormat = 1 (PCM)
-        view.setUint16(22, 1, true);  // NumChannels = 1 (Mono)
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, sampleRate * 2, true); // ByteRate
-        view.setUint16(32, 2, true);  // BlockAlign
-        view.setUint16(34, 16, true); // BitsPerSample
-
-        // data sub-chunk
+        view.setUint32(16, 16, true);             // Subchunk1Size (16 for PCM)
+        view.setUint16(20, 1, true);              // AudioFormat (1 = PCM)
+        view.setUint16(22, 1, true);              // NumChannels (1 = Mono)
+        view.setUint32(24, sampleRate, true);     // SampleRate
+        view.setUint32(28, sampleRate * 2, true); // ByteRate (SampleRate * NumChannels * BitsPerSample/8)
+        view.setUint16(32, 2, true);              // BlockAlign
+        view.setUint16(34, 16, true);             // BitsPerSample
         writeString(36, 'data');
-        view.setUint32(40, samples.length * 2, true);
+        view.setUint32(40, totalSamples * 2, true);
 
-        // Convert Float32 [-1.0, 1.0] to Int16
-        let offset = 44;
-        for (let i = 0; i < samples.length; i++, offset += 2) {
-          const s = Math.max(-1, Math.min(1, samples[i]));
-          view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        // Interleave & clamp Float32 samples into signed 16-bit PCM
+        let byteOffset = 44;
+        for (let c = 0; c < float32Chunks.length; c++) {
+          const chunk = float32Chunks[c];
+          for (let i = 0; i < chunk.length; i++) {
+            let s = chunk[i];
+            if (s > 1) s = 1;
+            else if (s < -1) s = -1;
+            view.setInt16(byteOffset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+            byteOffset += 2;
+          }
         }
 
-        return new Blob([view], { type: 'audio/wav' });
+        return new Blob([buffer], { type: 'audio/wav' });
       }
 
       // =========================================================================
-      // UI Status & Visualizer Canvas
+      // UI Rendering: Stats, Threshold, Visualizer & Highlight Reel
       // =========================================================================
+      function renderStats() {
+        els.statTotal.textContent = String(state.stats.totalFarts);
+        els.statLongest.textContent =
+          state.stats.longestFart > 0 ? formatClipDuration(state.stats.longestFart) : '0.00s';
+        els.statLoudest.textContent = `${Math.round(state.stats.loudestFart)} dB`;
+      }
+
+      function renderThresholdUI() {
+        els.thresholdSlider.value = String(state.thresholdDB);
+        els.thresholdValue.textContent = `${state.thresholdDB} dB`;
+        els.thresholdMarker.style.left = `${state.thresholdDB}%`;
+      }
+
       function updateStatusUI(mode) {
         if (mode === 'detecting') {
-          els.statusBadge.className = 'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-orange-500/20 text-orange-300 border border-orange-400/30 transition-colors';
+          els.statusBadge.className =
+            'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-orange-500/20 text-orange-300 border border-orange-500/30 transition-colors';
           els.statusDot.className = 'w-2 h-2 rounded-full bg-orange-400 animate-ping';
           els.statusText.textContent = 'Fart Detected!';
-          els.meterFill.className = 'h-full rounded-full bg-gradient-to-r from-orange-500 to-amber-400 transition-[width] duration-75 ease-out';
-          els.meterCard.classList.add('border-orange-500/40');
-          els.meterCard.classList.remove('border-white/10');
+          els.meterCard.classList.add('border-orange-500/40', 'shadow-[0_0_24px_rgba(249,115,22,0.16)]');
+          els.meterFill.className =
+            'h-full rounded-full bg-gradient-to-r from-orange-500 to-amber-400 transition-[width] duration-75 ease-out';
         } else if (mode === 'listening') {
-          els.statusBadge.className = 'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-colors';
+          els.statusBadge.className =
+            'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 transition-colors';
           els.statusDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
           els.statusText.textContent = 'Listening...';
-          els.meterFill.className = 'h-full rounded-full bg-gradient-to-r from-emerald-500 to-green-400 transition-[width] duration-75 ease-out';
-          els.meterCard.classList.remove('border-orange-500/40');
-          els.meterCard.classList.add('border-white/10');
+          els.meterCard.classList.remove('border-orange-500/40', 'shadow-[0_0_24px_rgba(249,115,22,0.16)]');
+          els.meterFill.className =
+            'h-full rounded-full bg-gradient-to-r from-emerald-500 to-green-400 transition-[width] duration-75 ease-out';
         } else {
-          els.statusBadge.className = 'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-white/10 text-slate-300 transition-colors';
+          els.statusBadge.className =
+            'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-white/10 text-slate-300 transition-colors';
           els.statusDot.className = 'w-2 h-2 rounded-full bg-slate-400';
           els.statusText.textContent = 'Ready';
-          els.meterFill.className = 'h-full rounded-full bg-gradient-to-r from-emerald-500 to-green-400 transition-[width] duration-75 ease-out';
-          els.meterCard.classList.remove('border-orange-500/40');
-          els.meterCard.classList.add('border-white/10');
-        }
-      }
-
-      function updateRecordButtonUI() {
-        if (state.isRecording) {
-          els.recordPulseRing.classList.remove('hidden');
-          els.micIcon.classList.add('hidden');
-          els.stopIcon.classList.remove('hidden');
-          els.recordBtnLabel.textContent = 'Stop';
-          els.recordTimer.classList.remove('hidden');
-          els.recordBtn.className = 'relative z-10 w-32 h-32 rounded-full bg-gradient-to-b from-rose-500 to-red-600 shadow-[0_12px_35px_rgba(244,63,94,0.45)] border-4 border-white/25 flex flex-col items-center justify-center gap-1 active:scale-95 transition-all duration-200 select-none';
-          els.recordHint.textContent = 'Listening live — tap Stop before playing clips';
-        } else {
-          els.recordPulseRing.classList.add('hidden');
-          els.micIcon.classList.remove('hidden');
-          els.stopIcon.classList.add('hidden');
-          els.recordBtnLabel.textContent = 'Record';
-          els.recordTimer.classList.add('hidden');
-          els.recordTimer.textContent = '00:00';
-          els.recordBtn.className = 'relative z-10 w-32 h-32 rounded-full bg-gradient-to-b from-emerald-400 to-green-600 shadow-[0_12px_35px_rgba(16,185,129,0.4)] border-4 border-white/20 flex flex-col items-center justify-center gap-1 active:scale-95 transition-all duration-200 select-none';
-          els.recordHint.textContent = 'Captures each fart automatically into your Highlight Reel';
-        }
-      }
-
-      function updatePlayAllButtonUI() {
-        const visibleClips = getSortedClips();
-        els.playAllBtn.disabled = visibleClips.length === 0;
-        if (state.isPlayingReel) {
-          els.playAllIcon.classList.add('hidden');
-          els.stopAllIcon.classList.remove('hidden');
-          els.playAllBtnText.textContent = 'Stop Reel';
-          els.playAllBtn.className = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-500 text-white shadow-md shadow-rose-500/25 hover:bg-rose-600 active:scale-95 transition';
-        } else {
-          els.playAllIcon.classList.remove('hidden');
-          els.stopAllIcon.classList.add('hidden');
-          els.playAllBtnText.textContent = state.sortBy === 'favorites' ? 'Play Favorites' : 'Play All';
-          els.playAllBtn.className = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md shadow-orange-500/20 hover:brightness-110 active:scale-95 disabled:opacity-35 disabled:pointer-events-none transition';
+          els.meterCard.classList.remove('border-orange-500/40', 'shadow-[0_0_24px_rgba(249,115,22,0.16)]');
+          els.meterFill.className =
+            'h-full rounded-full bg-gradient-to-r from-emerald-500 to-green-400 transition-[width] duration-75 ease-out';
         }
       }
 
       function resizeVisualizerCanvas() {
         const rect = els.visualizerContainer.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
         els.visualizerCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
         els.visualizerCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
-        drawVisualizerFrame();
+        drawVisualizer();
       }
 
-      function drawVisualizerFrame() {
+      function drawVisualizer() {
         const canvas = els.visualizerCanvas;
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
-        const width = canvas.width;
-        const height = canvas.height;
-        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.width;
+        const h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
 
-        ctx.clearRect(0, 0, width, height);
-
-        // Draw subtle threshold guide line
-        const thresholdY = height - (state.thresholdDB / 100) * (height - 8 * dpr) - 4 * dpr;
-        ctx.save();
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
-        ctx.lineWidth = Math.max(1, dpr);
-        ctx.setLineDash([4 * dpr, 4 * dpr]);
-        ctx.beginPath();
-        ctx.moveTo(0, thresholdY);
-        ctx.lineTo(width, thresholdY);
-        ctx.stroke();
-        ctx.restore();
-
-        // Draw rounded vertical bars
         const bars = state.visualizerBars;
         const count = bars.length;
-        const gap = 3 * dpr;
-        const totalGap = gap * (count + 1);
-        const barWidth = Math.max(2 * dpr, (width - totalGap) / count);
+        const gap = Math.max(2, Math.floor(w * 0.008));
+        const barWidth = Math.max(2, (w - gap * (count + 1)) / count);
+        const centerY = h / 2;
+
+        // Subtle threshold reference line
+        const thresholdY = h - (state.thresholdDB / 100) * h;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(0, thresholdY);
+        ctx.lineTo(w, thresholdY);
+        ctx.stroke();
+        ctx.setLineDash([]);
 
         for (let i = 0; i < count; i++) {
-          const db = bars[i];
-          const normalized = Math.max(0.05, Math.min(1, db / 100));
-          const barHeight = normalized * (height - 10 * dpr);
+          const val = bars[i]; // 0..100
+          const norm = Math.max(0.06, Math.min(1, val / 100));
+          const barH = norm * (h * 0.86);
           const x = gap + i * (barWidth + gap);
-          const y = (height - barHeight) / 2;
+          const y = centerY - barH / 2;
 
-          const isLoud = db >= state.thresholdDB;
+          const isLoud = val >= state.thresholdDB;
           ctx.fillStyle = isLoud
-            ? '#FB923C' // orange-400
+            ? 'rgba(251, 146, 60, 0.92)'
             : state.isRecording
-            ? '#34D399' // emerald-400
-            : 'rgba(148, 163, 184, 0.25)';
+              ? 'rgba(52, 211, 153, 0.82)'
+              : 'rgba(148, 163, 184, 0.25)';
 
+          const radius = Math.min(barWidth / 2, barH / 2);
           ctx.beginPath();
-          const radius = Math.min(barWidth / 2, barHeight / 2);
-          ctx.roundRect(x, y, barWidth, barHeight, radius);
+          if (ctx.roundRect) {
+            ctx.roundRect(x, y, barWidth, barH, radius);
+          } else {
+            ctx.rect(x, y, barWidth, barH);
+          }
           ctx.fill();
         }
       }
 
-      function startMeterAnimationLoop() {
-        let frameCount = 0;
-        function tick() {
-          if (!state.isRecording) return;
+      function getRecordHolderIds() {
+        let longestId = null;
+        let loudestId = null;
+        let maxDur = -1;
+        let maxDB = -1;
 
-          // Smooth meter slightly for visual polish while keeping detection instant
-          state.smoothedDisplayDB = state.smoothedDisplayDB * 0.55 + state.latestDisplayDB * 0.45;
-          const display = Math.round(state.smoothedDisplayDB);
-
-          els.liveDbValue.textContent = String(display);
-          els.meterFill.style.width = `${Math.max(0, Math.min(100, state.smoothedDisplayDB))}%`;
-
-          frameCount++;
-          if (frameCount % 2 === 0) {
-            state.visualizerBars.shift();
-            state.visualizerBars.push(state.latestDisplayDB);
+        for (const clip of state.clips) {
+          if (clip.duration > maxDur) {
+            maxDur = clip.duration;
+            longestId = clip.id;
           }
-
-          drawVisualizerFrame();
-          state.rafId = requestAnimationFrame(tick);
+          if (clip.peakDB > maxDB) {
+            maxDB = clip.peakDB;
+            loudestId = clip.id;
+          }
         }
-        state.rafId = requestAnimationFrame(tick);
+        return { longestId, loudestId };
+      }
+
+      function getSortedClips() {
+        let list = [...state.clips];
+        if (state.sortBy === 'favorites') {
+          list = list.filter((c) => Boolean(c.starred));
+          list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        } else if (state.sortBy === 'longest') {
+          list.sort((a, b) => b.duration - a.duration);
+        } else if (state.sortBy === 'loudest') {
+          list.sort((a, b) => b.peakDB - a.peakDB);
+        } else {
+          list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        }
+        return list;
+      }
+
+      function updatePlayAllButtonUI() {
+        const visibleClips = getSortedClips();
+        els.playAllBtn.disabled = visibleClips.length === 0;
+
+        if (state.isPlayingReel) {
+          els.playAllIcon.classList.add('hidden');
+          els.stopAllIcon.classList.remove('hidden');
+          els.playAllBtnText.textContent = 'Stop Reel';
+          els.playAllBtn.className =
+            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-500 text-white shadow-md shadow-rose-500/25 hover:brightness-110 active:scale-95 transition';
+        } else {
+          els.playAllIcon.classList.remove('hidden');
+          els.stopAllIcon.classList.add('hidden');
+          els.playAllBtnText.textContent = state.sortBy === 'favorites' ? 'Play Favorites' : 'Play All';
+          els.playAllBtn.className =
+            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md shadow-orange-500/20 hover:brightness-110 active:scale-95 disabled:opacity-35 disabled:pointer-events-none transition';
+        }
+      }
+
+      function renderHighlightReel() {
+        const totalClips = state.clips.length;
+        const favoritesCount = state.clips.filter((c) => Boolean(c.starred)).length;
+        const visibleClips = getSortedClips();
+
+        els.reelCountBadge.textContent = String(totalClips);
+        els.favoritesCountText.textContent = String(favoritesCount);
+
+        // Update Sort Pill styling
+        document.querySelectorAll('.sort-pill').forEach((btn) => {
+          const isActive = btn.dataset.sort === state.sortBy;
+          if (isActive) {
+            btn.className =
+              btn.dataset.sort === 'favorites'
+                ? 'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/35 transition'
+                : 'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition';
+          } else {
+            btn.className =
+              'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white/[0.06] text-slate-400 border border-white/10 hover:text-slate-200 transition';
+          }
+        });
+
+        updatePlayAllButtonUI();
+
+        if (totalClips === 0) {
+          els.sortBar.classList.add('hidden');
+          els.emptyReelState.classList.remove('hidden');
+          els.emptyFavoritesState.classList.add('hidden');
+          els.reelList.innerHTML = '';
+          return;
+        }
+
+        els.sortBar.classList.remove('hidden');
+        els.emptyReelState.classList.add('hidden');
+
+        if (visibleClips.length === 0 && state.sortBy === 'favorites') {
+          els.emptyFavoritesState.classList.remove('hidden');
+          els.reelList.innerHTML = '';
+          return;
+        }
+
+        els.emptyFavoritesState.classList.add('hidden');
+
+        const { longestId, loudestId } = getRecordHolderIds();
+
+        els.reelList.innerHTML = visibleClips
+          .map((clip) => {
+            const isPlaying = state.playingClipId === clip.id;
+            const isStarred = Boolean(clip.starred);
+            const isLongest = clip.id === longestId;
+            const isLoudest = clip.id === loudestId;
+
+            let badges = '';
+            if (isLongest) {
+              badges += `<span class="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30">🏆 Longest</span>`;
+            }
+            if (isLoudest) {
+              badges += `<span class="px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-orange-500/20 text-orange-300 border border-orange-500/30">🔊 Loudest</span>`;
+            }
+
+            const cardBorder = isPlaying
+              ? 'border-emerald-400/50 bg-emerald-500/[0.10] shadow-[0_0_16px_rgba(16,185,129,0.16)]'
+              : 'border-white/10 bg-white/[0.04] hover:bg-white/[0.07]';
+
+            const playBtnStyle = isPlaying
+              ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/30'
+              : 'bg-white/10 text-white hover:bg-emerald-500/80';
+
+            const playIconSvg = isPlaying
+              ? `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>`
+              : `<svg class="w-4 h-4 ml-0.5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5.14v14l11-7-11-7z"/></svg>`;
+
+            const starBtnStyle = isStarred
+              ? 'bg-amber-500/20 text-amber-400 border border-amber-400/40 shadow-[0_0_10px_rgba(251,191,36,0.25)]'
+              : 'bg-white/[0.06] text-slate-400 hover:bg-amber-500/15 hover:text-amber-300';
+
+            const starIconSvg = isStarred
+              ? `<svg class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M10.788 3.21c.448-1.077 1.976-1.077 2.424 0l2.082 5.007 5.404.433c1.164.093 1.636 1.545.749 2.305l-4.117 3.527 1.257 5.273c.271 1.136-.964 2.033-1.96 1.425L12 18.354 7.373 21.18c-.996.608-2.231-.29-1.96-1.425l1.257-5.273-4.117-3.527c-.887-.76-.415-2.212.749-2.305l5.404-.433 2.082-5.006z"/></svg>`
+              : `<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z"/></svg>`;
+
+            return `
+              <li class="rounded-2xl border p-2.5 transition-all ${cardBorder}">
+                <div class="flex items-center gap-2.5">
+                  <!-- Play / Pause Button -->
+                  <button
+                    type="button"
+                    data-action="play"
+                    data-clip-id="${clip.id}"
+                    aria-label="${isPlaying ? 'Pause clip' : 'Play clip'}"
+                    class="w-10 h-10 shrink-0 rounded-xl flex items-center justify-center active:scale-90 transition ${playBtnStyle}"
+                  >
+                    ${playIconSvg}
+                  </button>
+
+                  <!-- Clip Metadata & Mini Progress Bar -->
+                  <div class="flex-1 min-w-0">
+                    <div class="flex items-center flex-wrap gap-1.5 mb-0.5">
+                      <span class="text-xs font-extrabold font-mono text-sky-300 tabular-nums">${formatClipDuration(clip.duration)}</span>
+                      <span class="text-slate-600 text-[10px]">•</span>
+                      <span class="text-xs font-extrabold font-mono text-orange-400 tabular-nums">${Math.round(clip.peakDB)} dB</span>
+                      ${badges}
+                    </div>
+                    <div class="text-[10px] text-slate-400 truncate mb-1.5">${formatTimestamp(clip.timestamp)}</div>
+
+                    <!-- Mini Playback Progress Bar -->
+                    <div class="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
+                      <div
+                        data-progress-id="${clip.id}"
+                        class="h-full rounded-full bg-gradient-to-r from-emerald-400 to-green-400 transition-[width] duration-75"
+                        style="width: ${isPlaying ? '2%' : '0%'}"
+                      ></div>
+                    </div>
+                  </div>
+
+                  <!-- Share, Star, Save WAV & Delete Actions -->
+                  <div class="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      data-action="share"
+                      data-clip-id="${clip.id}"
+                      aria-label="Share WAV clip"
+                      title="Share WAV + stats"
+                      class="w-8 h-8 rounded-xl bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/25 active:scale-90 flex items-center justify-center transition"
+                    >
+                      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M7.217 10.907a2.25 2.25 0 100 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186l9.566-5.314m-9.566 7.5l9.566 5.314m0 0a2.25 2.25 0 103.935 2.186 2.25 2.25 0 00-3.935-2.186zm0-12.814a2.25 2.25 0 103.933-2.185 2.25 2.25 0 00-3.933 2.185z" />
+                      </svg>
+                    </button>
+
+                    <button
+                      type="button"
+                      data-action="star"
+                      data-clip-id="${clip.id}"
+                      aria-label="${isStarred ? 'Remove from favorites' : 'Add to favorites'}"
+                      title="${isStarred ? 'Unstar favorite' : 'Star favorite'}"
+                      class="w-8 h-8 rounded-xl active:scale-90 flex items-center justify-center transition ${starBtnStyle}"
+                    >
+                      ${starIconSvg}
+                    </button>
+
+                    <button
+                      type="button"
+                      data-action="download"
+                      data-clip-id="${clip.id}"
+                      aria-label="Download WAV"
+                      title="Save WAV"
+                      class="w-8 h-8 rounded-xl bg-white/[0.06] text-slate-300 hover:bg-sky-500/20 hover:text-sky-300 active:scale-90 flex items-center justify-center transition"
+                    >
+                      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                      </svg>
+                    </button>
+
+                    <button
+                      type="button"
+                      data-action="delete"
+                      data-clip-id="${clip.id}"
+                      aria-label="Delete clip"
+                      title="Delete clip"
+                      class="w-8 h-8 rounded-xl bg-white/[0.06] text-slate-400 hover:bg-rose-500/20 hover:text-rose-400 active:scale-90 flex items-center justify-center transition"
+                    >
+                      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              </li>
+            `;
+          })
+          .join('');
       }
 
       // =========================================================================
-      // Real-Time PCM Audio Processing & Event Finalization
+      // Audio Capture, Fast-Transient Detection & Clip Finalization
       // =========================================================================
+      function resetDetectionBuffers() {
+        state.preRollChunks = [];
+        state.preRollSamples = 0;
+        state.isDetectingEvent = false;
+        state.eventStartTime = 0;
+        state.lastLoudTime = 0;
+        state.currentEventPeakDB = 0;
+        state.activeClipChunks = [];
+        state.activeClipSamples = 0;
+      }
+
+      function pushToPreRoll(chunkCopy) {
+        const maxPreRollSamples = Math.floor(state.sampleRate * PRE_ROLL_SECONDS);
+        state.preRollChunks.push(chunkCopy);
+        state.preRollSamples += chunkCopy.length;
+
+        while (state.preRollSamples - state.preRollChunks[0].length >= maxPreRollSamples && state.preRollChunks.length > 1) {
+          const removed = state.preRollChunks.shift();
+          state.preRollSamples -= removed.length;
+        }
+      }
+
       function handleAudioProcess(audioProcessingEvent) {
         if (!state.isRecording) return;
 
         const inputBuffer = audioProcessingEvent.inputBuffer;
-        const inputData = inputBuffer.getChannelData(0);
+        const channelData = inputBuffer.getChannelData(0);
+        const chunkCopy = new Float32Array(channelData.length);
+        chunkCopy.set(channelData);
 
-        // Copy PCM samples so we retain our own immutable buffer
-        const chunkCopy = new Float32Array(inputData.length);
-        chunkCopy.set(inputData);
-
-        // Fast transient peak sample detection directly inside the ~23ms PCM callback
-        let peakAmp = 0;
+        // Compute direct peak amplitude inside this ~23ms chunk so fast pops aren't averaged out
+        let peakAbs = 0;
         for (let i = 0; i < chunkCopy.length; i++) {
           const abs = Math.abs(chunkCopy[i]);
-          if (abs > peakAmp) peakAmp = abs;
+          if (abs > peakAbs) peakAbs = abs;
         }
-        const rawDb = peakAmp > 0.00001 ? 20 * Math.log10(peakAmp) + 100 : 0;
-        const displayDB = Math.max(0, Math.min(100, rawDb));
 
+        // Convert linear peak amplitude (0..1) to 0..100 display dB scale
+        const dbfs = peakAbs > 0.00001 ? 20 * Math.log10(peakAbs) : -100;
+        const displayDB = Math.max(0, Math.min(100, dbfs + 100));
         state.latestDisplayDB = displayDB;
 
         const now = performance.now();
-        const chunkDurationMs = (chunkCopy.length / state.sampleRate) * 1000;
 
         if (displayDB >= state.thresholdDB) {
           if (!state.isDetectingEvent) {
-            // Start a new fart event! Seed with rolling ~0.25s pre-roll buffer
+            // Start new fart event — prepend rolling ~0.25s pre-roll buffer
             state.isDetectingEvent = true;
             state.eventStartTime = now;
-            state.lastLoudTime = now + chunkDurationMs;
+            state.lastLoudTime = now;
             state.currentEventPeakDB = displayDB;
 
             state.activeClipChunks = state.preRollChunks.slice();
@@ -991,35 +1186,35 @@
 
             updateStatusUI('detecting');
           } else {
-            state.currentEventPeakDB = Math.max(state.currentEventPeakDB, displayDB);
-            state.lastLoudTime = now + chunkDurationMs;
+            state.lastLoudTime = now;
+            if (displayDB > state.currentEventPeakDB) {
+              state.currentEventPeakDB = displayDB;
+            }
             state.activeClipChunks.push(chunkCopy);
             state.activeClipSamples += chunkCopy.length;
           }
         } else if (state.isDetectingEvent) {
-          // Keep capturing brief tail during silence debounce
+          // Keep appending during silence debounce so post-roll tail is preserved
           state.activeClipChunks.push(chunkCopy);
           state.activeClipSamples += chunkCopy.length;
 
           if (now - state.lastLoudTime >= SILENCE_DEBOUNCE_MS) {
-            finalizeFartClip();
-            if (state.isRecording) {
-              updateStatusUI('listening');
-            }
+            finalizeDetectedEvent();
           }
         }
 
-        // Always maintain rolling ~0.25s pre-roll buffer
+        // Always maintain pre-roll ring buffer
         pushToPreRoll(chunkCopy);
       }
 
-      async function finalizeFartClip() {
-        const durationMs = Math.max(0, state.lastLoudTime - state.eventStartTime);
+      async function finalizeDetectedEvent() {
+        const start = state.eventStartTime;
+        const end = state.lastLoudTime;
         const peakDB = state.currentEventPeakDB;
-        const chunksToEncode = state.activeClipChunks;
-        const sampleRate = state.sampleRate;
+        const chunks = state.activeClipChunks;
+        const totalSamples = state.activeClipSamples;
 
-        // Reset active event trackers immediately
+        // Reset active event state immediately
         state.isDetectingEvent = false;
         state.eventStartTime = 0;
         state.lastLoudTime = 0;
@@ -1027,140 +1222,185 @@
         state.activeClipChunks = [];
         state.activeClipSamples = 0;
 
-        // Filter out ultra-brief clicks/taps under 0.05s (50ms)
-        if (durationMs < MIN_FART_DURATION_MS || chunksToEncode.length === 0) {
+        if (state.isRecording) {
+          updateStatusUI('listening');
+        }
+
+        // Compute measured duration (at least 1 chunk duration if triggered)
+        const chunkDurationMs = (PCM_BUFFER_SIZE / state.sampleRate) * 1000;
+        const rawDurationMs = Math.max(chunkDurationMs, end - start);
+
+        if (rawDurationMs < MIN_FART_DURATION_MS || totalSamples === 0) {
           return;
         }
 
-        const durationSec = durationMs / 1000;
+        const durationSec = rawDurationMs / 1000;
 
-        // Trim extra trailing silence beyond our ~0.30s post-roll tail
-        const desiredSeconds = PRE_ROLL_SECONDS + durationSec + POST_ROLL_TAIL_SECONDS;
-        const maxSamples = Math.ceil(desiredSeconds * sampleRate);
-        const mergedPCM = mergeFloat32Chunks(chunksToEncode, maxSamples);
-        const wavBlob = encodeMonoWAV(mergedPCM, sampleRate);
-        const clipUrl = URL.createObjectURL(wavBlob);
+        // Trim any excessive post-roll silence beyond POST_ROLL_TAIL_SECONDS
+        const maxClipSamples = Math.floor(
+          (PRE_ROLL_SECONDS + durationSec + POST_ROLL_TAIL_SECONDS) * state.sampleRate
+        );
+        let keptSamples = 0;
+        const trimmedChunks = [];
+        for (let i = 0; i < chunks.length; i++) {
+          if (keptSamples >= maxClipSamples) break;
+          trimmedChunks.push(chunks[i]);
+          keptSamples += chunks[i].length;
+        }
 
-        const newClip = {
+        // Encode 16-bit mono WAV
+        const wavBlob = encodeWavBlob(trimmedChunks, keptSamples, state.sampleRate);
+        const clip = {
           id: `fart_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
           timestamp: new Date().toISOString(),
           duration: durationSec,
           peakDB: peakDB,
           starred: false,
           blob: wavBlob,
-          url: clipUrl,
+          url: URL.createObjectURL(wavBlob),
         };
 
         // Update stats
         state.stats.totalFarts += 1;
-        flashStatCard(els.cardTotal, 'ring-emerald-400/70');
+        flashStatCard(els.cardTotal, 'ring-2');
 
         if (durationSec > state.stats.longestFart) {
           state.stats.longestFart = durationSec;
-          flashStatCard(els.cardLongest, 'ring-sky-400/70');
+          flashStatCard(els.cardLongest, 'ring-2');
         }
         if (peakDB > state.stats.loudestFart) {
           state.stats.loudestFart = peakDB;
-          flashStatCard(els.cardLoudest, 'ring-orange-400/70');
+          flashStatCard(els.cardLoudest, 'ring-2');
         }
 
         saveStats();
         renderStats();
 
-        // Add to Highlight Reel & persist to IndexedDB
-        state.clips.unshift(newClip);
-        renderHighlightReel(newClip.id);
-        await saveClipToDB(newClip);
+        // Add to Highlight Reel & persist in IndexedDB
+        state.clips.unshift(clip);
+        renderHighlightReel();
+        await saveClipToDB(clip);
+
+        showToast(`Captured! ${formatClipDuration(durationSec)} • ${Math.round(peakDB)} dB`);
       }
 
-      // =========================================================================
-      // Start & Stop Microphone Recording (iOS Safari Compatible)
-      // =========================================================================
+      function startMeterAnimationLoop() {
+        function frame() {
+          if (!state.isRecording) return;
+
+          // Fast attack, smooth decay for crisp visual meter
+          if (state.latestDisplayDB > state.smoothedDisplayDB) {
+            state.smoothedDisplayDB = state.latestDisplayDB;
+          } else {
+            state.smoothedDisplayDB = state.smoothedDisplayDB * 0.82 + state.latestDisplayDB * 0.18;
+          }
+
+          const dbDisplay = Math.round(state.smoothedDisplayDB);
+          els.liveDbValue.textContent = String(dbDisplay);
+          els.meterFill.style.width = `${Math.min(100, Math.max(0, state.smoothedDisplayDB))}%`;
+
+          // Push into scrolling visualizer bars
+          state.visualizerBars.shift();
+          state.visualizerBars.push(state.smoothedDisplayDB);
+          drawVisualizer();
+
+          state.rafId = requestAnimationFrame(frame);
+        }
+        state.rafId = requestAnimationFrame(frame);
+      }
+
       async function startRecording() {
         clearError();
         stopAllPlayback();
 
+        // Verify HTTPS / secure context for iOS Safari
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          showError('Microphone access requires HTTPS (or localhost). Open this page over HTTPS in Safari to record.');
+          showError(
+            'Microphone access requires HTTPS. Open FartCount from your GitHub Pages or Netlify HTTPS link in Safari.'
+          );
           return;
         }
 
         try {
-          // Request raw microphone stream without aggressive browser filtering
-          let stream;
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({
-              audio: {
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false,
-              },
-            });
-          } catch {
-            // Fallback for older iOS Safari constraints
-            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          }
-
           const AudioCtx = window.AudioContext || window.webkitAudioContext;
-          const audioContext = new AudioCtx();
-          if (audioContext.state === 'suspended') {
-            await audioContext.resume();
+          if (!AudioCtx) {
+            showError('Your browser does not support Web Audio recording.');
+            return;
           }
 
-          state.audioContext = audioContext;
+          // Create/resume AudioContext directly inside the user tap gesture (iOS Safari requirement)
+          const audioCtx = new AudioCtx();
+          if (audioCtx.state === 'suspended') {
+            await audioCtx.resume();
+          }
+
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            },
+            video: false,
+          });
+
+          state.audioContext = audioCtx;
+          state.sampleRate = audioCtx.sampleRate || 44100;
           state.mediaStream = stream;
-          state.sampleRate = audioContext.sampleRate || 44100;
 
-          // Reset rolling buffers
-          state.preRollChunks = [];
-          state.preRollSamples = 0;
-          state.isDetectingEvent = false;
-          state.activeClipChunks = [];
-          state.activeClipSamples = 0;
-          state.latestDisplayDB = 0;
-          state.smoothedDisplayDB = 0;
-
-          // Build Web Audio graph: Source -> ScriptProcessor (1024 samples ~23ms) -> SilentGain (0) -> Destination
-          const source = audioContext.createMediaStreamSource(stream);
-          const processor = audioContext.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
-          const silentGain = audioContext.createGain();
-          silentGain.gain.value = 0;
+          const source = audioCtx.createMediaStreamSource(stream);
+          const processor = audioCtx.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
+          const silentGain = audioCtx.createGain();
+          silentGain.gain.value = 0; // Mute live mic monitor to prevent feedback
 
           processor.onaudioprocess = handleAudioProcess;
-
           source.connect(processor);
           processor.connect(silentGain);
-          silentGain.connect(audioContext.destination);
+          silentGain.connect(audioCtx.destination);
 
           state.sourceNode = source;
           state.processorNode = processor;
           state.silentGainNode = silentGain;
-          state.isRecording = true;
 
-          // Start session timer
+          resetDetectionBuffers();
+          state.isRecording = true;
           state.recordStartTime = Date.now();
+          state.latestDisplayDB = 0;
+          state.smoothedDisplayDB = 0;
+
+          // Update Record Button UI
+          els.recordBtn.className =
+            'relative z-10 w-32 h-32 rounded-full bg-gradient-to-b from-rose-500 to-red-600 shadow-[0_12px_35px_rgba(244,63,94,0.45)] border-4 border-white/25 flex flex-col items-center justify-center gap-1 active:scale-95 transition-all duration-200 select-none';
+          els.recordPulseRing.classList.remove('hidden');
+          els.micIcon.classList.add('hidden');
+          els.stopIcon.classList.remove('hidden');
+          els.recordBtnLabel.textContent = 'Stop';
           els.recordTimer.textContent = '00:00';
+          els.recordTimer.classList.remove('hidden');
+          els.recordHint.textContent = 'Listening live — every fart clips automatically';
+
+          updateStatusUI('listening');
+
           state.recordTimerInterval = setInterval(() => {
             els.recordTimer.textContent = formatTimer(Date.now() - state.recordStartTime);
           }, 250);
 
-          updateRecordButtonUI();
-          updateStatusUI('listening');
           startMeterAnimationLoop();
         } catch (err) {
           console.error('Microphone error:', err);
           if (err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')) {
-            showError('Microphone permission was denied. Enable mic access for Safari in iPhone Settings and reload.');
+            showError(
+              'Microphone permission was denied. In iPhone Safari, tap the "aA" or site settings icon in the address bar and allow Microphone access.'
+            );
           } else {
             showError(`Could not access microphone: ${err.message || 'Unknown error'}`);
           }
-          stopRecording();
+          await stopRecording();
         }
       }
 
-      function stopRecording() {
+      async function stopRecording() {
         if (state.isDetectingEvent) {
-          finalizeFartClip();
+          await finalizeDetectedEvent();
         }
 
         state.isRecording = false;
@@ -1186,218 +1426,49 @@
           console.warn('Error disconnecting audio nodes:', err);
         }
 
-        // Stop all microphone tracks so iOS Safari routes audio back to the main loudspeaker
+        // Stop all mic tracks cleanly so iOS Safari routes audio back to the loudspeaker
         if (state.mediaStream) {
           state.mediaStream.getTracks().forEach((track) => track.stop());
           state.mediaStream = null;
         }
 
         if (state.audioContext) {
-          state.audioContext.close().catch(() => {});
+          try {
+            await state.audioContext.close();
+          } catch (err) {
+            console.warn('Error closing AudioContext:', err);
+          }
           state.audioContext = null;
         }
 
         state.sourceNode = null;
         state.processorNode = null;
         state.silentGainNode = null;
+        resetDetectionBuffers();
+
+        // Reset meter & visualizer
         state.latestDisplayDB = 0;
         state.smoothedDisplayDB = 0;
         state.visualizerBars.fill(0);
-
         els.liveDbValue.textContent = '0';
         els.meterFill.style.width = '0%';
-        drawVisualizerFrame();
+        drawVisualizer();
 
-        updateRecordButtonUI();
+        // Reset Record Button UI
+        els.recordBtn.className =
+          'relative z-10 w-32 h-32 rounded-full bg-gradient-to-b from-emerald-400 to-green-600 shadow-[0_12px_35px_rgba(16,185,129,0.4)] border-4 border-white/20 flex flex-col items-center justify-center gap-1 active:scale-95 transition-all duration-200 select-none';
+        els.recordPulseRing.classList.add('hidden');
+        els.micIcon.classList.remove('hidden');
+        els.stopIcon.classList.add('hidden');
+        els.recordBtnLabel.textContent = 'Record';
+        els.recordTimer.classList.add('hidden');
+        els.recordHint.textContent = 'Captures each fart automatically into your Highlight Reel';
+
         updateStatusUI('ready');
       }
 
       // =========================================================================
-      // Highlight Reel Rendering, Record Badges, Favorites & Sorting
-      // =========================================================================
-      function getSortedClips() {
-        let list = state.clips.slice();
-        if (state.sortBy === 'favorites') {
-          list = list.filter((c) => c.starred);
-          list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-        } else if (state.sortBy === 'longest') {
-          list.sort((a, b) => b.duration - a.duration);
-        } else if (state.sortBy === 'loudest') {
-          list.sort((a, b) => b.peakDB - a.peakDB);
-        } else {
-          list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-        }
-        return list;
-      }
-
-      function getRecordHolderIds() {
-        if (state.clips.length === 0) return { longestId: null, loudestId: null };
-        let longest = state.clips[0];
-        let loudest = state.clips[0];
-        for (let i = 1; i < state.clips.length; i++) {
-          const c = state.clips[i];
-          if (c.duration > longest.duration) longest = c;
-          if (c.peakDB > loudest.peakDB) loudest = c;
-        }
-        return { longestId: longest.id, loudestId: loudest.id };
-      }
-
-      function renderHighlightReel(newlyAddedId = null) {
-        const starredCount = state.clips.filter((c) => c.starred).length;
-        els.reelCountBadge.textContent = String(state.clips.length);
-        if (els.favoritesCountText) {
-          els.favoritesCountText.textContent = String(starredCount);
-        }
-        updatePlayAllButtonUI();
-
-        if (state.clips.length === 0) {
-          els.emptyReelState.classList.remove('hidden');
-          els.emptyFavoritesState.classList.add('hidden');
-          els.sortBar.classList.add('hidden');
-          els.reelList.innerHTML = '';
-          return;
-        }
-
-        els.emptyReelState.classList.add('hidden');
-        els.sortBar.classList.remove('hidden');
-
-        const { longestId, loudestId } = getRecordHolderIds();
-        const sortedClips = getSortedClips();
-
-        if (state.sortBy === 'favorites' && sortedClips.length === 0) {
-          els.emptyFavoritesState.classList.remove('hidden');
-          els.reelList.innerHTML = '';
-          return;
-        }
-
-        els.emptyFavoritesState.classList.add('hidden');
-
-        els.reelList.innerHTML = sortedClips
-          .map((clip) => {
-            const isPlaying = state.playingClipId === clip.id;
-            const isLongest = clip.id === longestId;
-            const isLoudest = clip.id === loudestId;
-            const isStarred = Boolean(clip.starred);
-            const isNewClass = clip.id === newlyAddedId ? 'animate-popIn' : '';
-
-            const badges = [
-              isLongest
-                ? `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-sky-500/20 text-sky-300 border border-sky-400/30">🏆 Longest</span>`
-                : '',
-              isLoudest
-                ? `<span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-orange-500/20 text-orange-300 border border-orange-400/30">🔊 Loudest</span>`
-                : '',
-            ]
-              .filter(Boolean)
-              .join('');
-
-            const activeCardStyle = isPlaying
-              ? 'border-emerald-400/50 bg-emerald-500/[0.10] shadow-[0_0_20px_rgba(16,185,129,0.12)]'
-              : isStarred
-              ? 'border-amber-400/25 bg-amber-500/[0.05] hover:bg-amber-500/[0.08]'
-              : 'border-white/[0.08] bg-white/[0.04] hover:bg-white/[0.07]';
-
-            const playBtnStyle = isPlaying
-              ? 'bg-emerald-500 text-white shadow-md shadow-emerald-500/30'
-              : 'bg-white/10 text-emerald-400 hover:bg-emerald-500/20';
-
-            const playIconSvg = isPlaying
-              ? `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>`
-              : `<svg class="w-4 h-4 translate-x-[1px]" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5.14v14l11-7-11-7z"/></svg>`;
-
-            const starBtnStyle = isStarred
-              ? 'bg-amber-500/20 text-amber-400 border border-amber-400/40 shadow-[0_0_12px_rgba(251,191,36,0.3)]'
-              : 'bg-white/[0.06] text-slate-400 hover:bg-amber-500/15 hover:text-amber-300';
-
-            const starIconSvg = isStarred
-              ? `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z" /></svg>`
-              : `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z" /></svg>`;
-
-            return `
-              <li
-                data-clip-id="${clip.id}"
-                class="${isNewClass} rounded-2xl border p-2.5 transition-all duration-200 ${activeCardStyle}"
-              >
-                <div class="flex items-center gap-2">
-                  <!-- Play / Pause Button -->
-                  <button
-                    type="button"
-                    data-action="play"
-                    data-clip-id="${clip.id}"
-                    aria-label="${isPlaying ? 'Pause clip' : 'Play clip'}"
-                    class="w-10 h-10 shrink-0 rounded-xl flex items-center justify-center active:scale-90 transition ${playBtnStyle}"
-                  >
-                    ${playIconSvg}
-                  </button>
-
-                  <!-- Clip Metadata & Mini Progress Bar -->
-                  <div class="flex-1 min-w-0">
-                    <div class="flex items-center flex-wrap gap-1.5 mb-0.5">
-                      <span class="text-xs font-extrabold font-mono text-sky-300 tabular-nums">${clip.duration.toFixed(2)}s</span>
-                      <span class="text-slate-600 text-[10px]">•</span>
-                      <span class="text-xs font-extrabold font-mono text-orange-400 tabular-nums">${Math.round(clip.peakDB)} dB</span>
-                      ${badges}
-                    </div>
-                    <div class="text-[10px] text-slate-400 truncate mb-1.5">${formatTimestamp(clip.timestamp)}</div>
-
-                    <!-- Mini Playback Progress Bar -->
-                    <div class="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
-                      <div
-                        data-progress-id="${clip.id}"
-                        class="h-full rounded-full bg-gradient-to-r from-emerald-400 to-green-400 transition-[width] duration-75"
-                        style="width: ${isPlaying ? '2%' : '0%'}"
-                      ></div>
-                    </div>
-                  </div>
-
-                  <!-- Star, Save WAV & Delete Actions -->
-                  <div class="flex items-center gap-1 shrink-0">
-                    <button
-                      type="button"
-                      data-action="star"
-                      data-clip-id="${clip.id}"
-                      aria-label="${isStarred ? 'Remove from favorites' : 'Add to favorites'}"
-                      title="${isStarred ? 'Unstar favorite' : 'Star favorite'}"
-                      class="w-9 h-9 rounded-xl active:scale-90 flex items-center justify-center transition ${starBtnStyle}"
-                    >
-                      ${starIconSvg}
-                    </button>
-
-                    <button
-                      type="button"
-                      data-action="download"
-                      data-clip-id="${clip.id}"
-                      aria-label="Download WAV"
-                      title="Save WAV"
-                      class="w-9 h-9 rounded-xl bg-white/[0.06] text-slate-300 hover:bg-sky-500/20 hover:text-sky-300 active:scale-90 flex items-center justify-center transition"
-                    >
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                      </svg>
-                    </button>
-
-                    <button
-                      type="button"
-                      data-action="delete"
-                      data-clip-id="${clip.id}"
-                      aria-label="Delete clip"
-                      title="Delete clip"
-                      class="w-9 h-9 rounded-xl bg-white/[0.06] text-slate-400 hover:bg-rose-500/20 hover:text-rose-400 active:scale-90 flex items-center justify-center transition"
-                    >
-                      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              </li>
-            `;
-          })
-          .join('');
-      }
-
-      // =========================================================================
-      // Clip & Sequential Highlight Reel Playback
+      // Highlight Reel Playback (Single Clip & Sequential Play All)
       // =========================================================================
       function stopAllPlayback() {
         if (state.reelGapTimeout) {
@@ -1412,19 +1483,16 @@
         renderHighlightReel();
       }
 
-      function playClipById(clipId, fromReel = false) {
-        // Toggle pause if tapping the currently playing clip
+      async function playClipById(clipId, fromReel = false) {
+        // If user tapped the currently playing clip directly, pause/stop it
         if (!fromReel && state.playingClipId === clipId) {
           stopAllPlayback();
           return;
         }
 
-        const clip = state.clips.find((c) => c.id === clipId);
-        if (!clip || !clip.url) return;
-
-        // Always stop recording first so iOS Safari routes audio back to loudspeaker
+        // Stop active recording so iOS switches audio session back to main loudspeaker
         if (state.isRecording) {
-          stopRecording();
+          await stopRecording();
         }
 
         if (!fromReel) {
@@ -1436,74 +1504,114 @@
           state.reelQueue = [];
         }
 
+        const clip = state.clips.find((c) => c.id === clipId);
+        if (!clip || !clip.url) {
+          if (state.isPlayingReel) playNextInReel();
+          return;
+        }
+
         state.playingClipId = clip.id;
         renderHighlightReel();
 
-        els.clipAudioPlayer.src = clip.url;
-        els.clipAudioPlayer.currentTime = 0;
-        const playPromise = els.clipAudioPlayer.play();
-        if (playPromise && typeof playPromise.catch === 'function') {
-          playPromise.catch((err) => {
-            console.warn('Playback blocked:', err);
-            showToast('Tap Play again to enable audio');
-            stopAllPlayback();
-          });
+        try {
+          els.clipAudioPlayer.src = clip.url;
+          els.clipAudioPlayer.currentTime = 0;
+          await els.clipAudioPlayer.play();
+        } catch (err) {
+          console.warn('Playback blocked or failed:', err);
+          showToast('Tap Play again to hear clip');
+          stopAllPlayback();
         }
       }
 
-      function togglePlayAllReel() {
+      function playNextInReel() {
+        if (!state.isPlayingReel) return;
+
+        if (state.reelQueue.length === 0) {
+          stopAllPlayback();
+          showToast('Highlight Reel finished!');
+          return;
+        }
+
+        const nextId = state.reelQueue.shift();
+        playClipById(nextId, true);
+      }
+
+      async function togglePlayAllReel() {
         if (state.isPlayingReel) {
           stopAllPlayback();
           return;
         }
-        const ordered = getSortedClips();
-        if (ordered.length === 0) return;
+
+        const visibleClips = getSortedClips();
+        if (visibleClips.length === 0) return;
 
         if (state.isRecording) {
-          stopRecording();
+          await stopRecording();
         }
 
         state.isPlayingReel = true;
-        state.reelQueue = ordered.map((c) => c.id);
-        updatePlayAllButtonUI();
-
-        const firstId = state.reelQueue.shift();
-        if (firstId) {
-          playClipById(firstId, true);
-        }
+        state.reelQueue = visibleClips.map((c) => c.id);
+        playNextInReel();
       }
 
-      // Update mini progress bar during playback
-      els.clipAudioPlayer.addEventListener('timeupdate', () => {
-        if (!state.playingClipId) return;
-        const duration = els.clipAudioPlayer.duration;
-        if (!duration || !Number.isFinite(duration)) return;
-        const pct = Math.min(100, Math.max(0, (els.clipAudioPlayer.currentTime / duration) * 100));
-        const bar = els.reelList.querySelector(`[data-progress-id="${state.playingClipId}"]`);
-        if (bar) {
-          bar.style.width = `${pct}%`;
-        }
-      });
+      // =========================================================================
+      // Clip Share, Star (Favorite), Download (Save WAV) & Delete Actions
+      // =========================================================================
+      async function shareClip(clipId) {
+        const clip = state.clips.find((c) => c.id === clipId);
+        if (!clip || !clip.blob) return;
 
-      // Handle clip end (advance queue if in Play All / Play Favorites mode)
-      els.clipAudioPlayer.addEventListener('ended', () => {
-        if (state.isPlayingReel && state.reelQueue.length > 0) {
-          const nextId = state.reelQueue.shift();
-          state.playingClipId = null;
-          renderHighlightReel();
-          state.reelGapTimeout = setTimeout(() => {
-            if (state.isPlayingReel && nextId) {
-              playClipById(nextId, true);
+        const { longestId, loudestId } = getRecordHolderIds();
+        const tags = [];
+        if (clip.id === longestId) tags.push('🏆 Longest');
+        if (clip.id === loudestId) tags.push('🔊 Loudest');
+        if (clip.starred) tags.push('⭐ Favorite');
+        const badgeLine = tags.length ? ` (${tags.join(' • ')})` : '';
+
+        const ms = Math.round(clip.duration * 1000);
+        const durationRich = ms < 1000
+          ? `${ms}ms (${clip.duration.toFixed(2)}s)`
+          : `${clip.duration.toFixed(2)}s (${ms}ms)`;
+        const dbRounded = Math.round(clip.peakDB);
+        const appUrl = `${window.location.origin}${window.location.pathname}`;
+        const filename = getClipFilename(clip);
+
+        const richText = `💨 FartCount Clip${badgeLine}\n⏱️ Length: ${durationRich}\n🔊 Peak: ${dbRounded} dB\n\nTry FartCount: ${appUrl}`;
+        const wavFile = new File([clip.blob], filename, { type: 'audio/wav' });
+
+        // Native iPhone / mobile Share Sheet with WAV file + rich caption
+        if (navigator.share && navigator.canShare && navigator.canShare({ files: [wavFile] })) {
+          try {
+            await navigator.share({
+              title: `FartCount • ${formatClipDuration(clip.duration)} • ${dbRounded} dB`,
+              text: richText,
+              files: [wavFile],
+            });
+            // Also copy caption as a convenience in case iMessage drops text when a file is attached
+            copyTextToClipboard(richText);
+            showToast('Shared! Caption also copied');
+            return;
+          } catch (err) {
+            if (err && err.name === 'AbortError') return;
+            // Fallback: some browsers only allow sharing the file without text
+            try {
+              await navigator.share({ files: [wavFile] });
+              copyTextToClipboard(richText);
+              showToast('WAV shared! Caption copied to paste');
+              return;
+            } catch (err2) {
+              if (err2 && err2.name === 'AbortError') return;
             }
-          }, REEL_GAP_MS);
-        } else {
-          stopAllPlayback();
+          }
         }
-      });
 
-      // =========================================================================
-      // Clip Star (Favorite), Download (Save WAV) & Delete Actions
-      // =========================================================================
+        // Desktop / fallback: copy rich text caption + download smartly named WAV
+        copyTextToClipboard(richText);
+        downloadClipWav(clipId, true);
+        showToast('WAV downloaded & caption copied!');
+      }
+
       async function toggleClipStar(clipId) {
         const clip = state.clips.find((c) => c.id === clipId);
         if (!clip) return;
@@ -1514,17 +1622,19 @@
         showToast(clip.starred ? 'Saved to Favorites ⭐' : 'Removed from Favorites');
       }
 
-      function downloadClipWav(clipId) {
+      function downloadClipWav(clipId, silent = false) {
         const clip = state.clips.find((c) => c.id === clipId);
         if (!clip || !clip.url) return;
 
         const a = document.createElement('a');
         a.href = clip.url;
-        a.download = `FartCount_${clip.duration.toFixed(2)}s_${Math.round(clip.peakDB)}dB.wav`;
+        a.download = getClipFilename(clip);
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        showToast('Saved WAV clip!');
+        if (!silent) {
+          showToast(`Saved ${getClipFilename(clip)}`);
+        }
       }
 
       async function deleteClip(clipId) {
@@ -1545,16 +1655,19 @@
       }
 
       // =========================================================================
-      // Share Score & Reset All
+      // Share Overall Score & Reset All
       // =========================================================================
       async function shareScore() {
-        const text = `💨 My FartCount Stats:\n• Total Farts: ${state.stats.totalFarts}\n• Longest: ${state.stats.longestFart.toFixed(2)}s\n• Loudest: ${Math.round(state.stats.loudestFart)} dB\n\nTry FartCount: ${window.location.href}`;
+        const longestStr =
+          state.stats.longestFart > 0 ? formatClipDuration(state.stats.longestFart) : '0.00s';
+        const appUrl = `${window.location.origin}${window.location.pathname}`;
+        const text = `💨 My FartCount Stats:\n• Total Farts: ${state.stats.totalFarts}\n• Longest: ${longestStr}\n• Loudest: ${Math.round(state.stats.loudestFart)} dB\n\nTry it: ${appUrl}`;
 
         if (navigator.share) {
           try {
             await navigator.share({
               title: 'FartCount Stats',
-              text: text,
+              text,
             });
             return;
           } catch (err) {
@@ -1563,36 +1676,30 @@
         }
 
         // Reliable clipboard fallback (works inside iframes too)
-        try {
-          const textarea = document.createElement('textarea');
-          textarea.value = text;
-          textarea.style.position = 'fixed';
-          textarea.style.opacity = '0';
-          document.body.appendChild(textarea);
-          textarea.focus();
-          textarea.select();
-          document.execCommand('copy');
-          document.body.removeChild(textarea);
+        if (copyTextToClipboard(text)) {
           showToast('Stats copied to clipboard!');
-        } catch {
+        } else {
           showToast('Could not copy stats');
         }
       }
 
-      async function resetAll() {
-        stopRecording();
+      async function resetEverything() {
+        if (state.isRecording) {
+          await stopRecording();
+        }
         stopAllPlayback();
-
-        state.stats = { totalFarts: 0, longestFart: 0, loudestFart: 0 };
-        saveStats();
-        renderStats();
 
         state.clips.forEach((c) => {
           if (c.url) URL.revokeObjectURL(c.url);
         });
         state.clips = [];
+        state.stats = { totalFarts: 0, longestFart: 0, loudestFart: 0 };
+        state.sortBy = 'newest';
+
+        saveStats();
         await clearAllClipsFromDB();
 
+        renderStats();
         renderHighlightReel();
         els.resetModal.classList.add('hidden');
         showToast('All stats & clips cleared');
@@ -1612,27 +1719,46 @@
       els.thresholdSlider.addEventListener('input', (e) => {
         state.thresholdDB = Number(e.target.value);
         renderThresholdUI();
+        drawVisualizer();
         saveThreshold();
-        drawVisualizerFrame();
       });
 
-      els.playAllBtn.addEventListener('click', togglePlayAllReel);
-      els.shareBtn.addEventListener('click', shareScore);
+      els.playAllBtn.addEventListener('click', () => {
+        togglePlayAllReel();
+      });
 
+      els.shareBtn.addEventListener('click', () => {
+        shareScore();
+      });
+
+      // Reset Modal Controls
       els.resetBtn.addEventListener('click', () => {
         els.resetModal.classList.remove('hidden');
       });
+
       els.cancelResetBtn.addEventListener('click', () => {
         els.resetModal.classList.add('hidden');
       });
-      els.confirmResetBtn.addEventListener('click', resetAll);
+
+      els.confirmResetBtn.addEventListener('click', () => {
+        resetEverything();
+      });
+
       els.resetModal.addEventListener('click', (e) => {
         if (e.target === els.resetModal) {
           els.resetModal.classList.add('hidden');
         }
       });
 
-      // Delegated events for Highlight Reel clip cards (Play, Star, Download, Delete)
+      // Sort & Filter Pills
+      els.sortBar.addEventListener('click', (e) => {
+        const pill = e.target.closest('button[data-sort]');
+        if (!pill) return;
+        state.sortBy = pill.dataset.sort;
+        renderHighlightReel();
+      });
+
+      // Delegated events for Highlight Reel clip cards (Play, Share, Star, Download, Delete)
       els.reelList.addEventListener('click', (e) => {
         const btn = e.target.closest('button[data-action]');
         if (!btn) return;
@@ -1642,6 +1768,8 @@
 
         if (action === 'play') {
           playClipById(clipId, false);
+        } else if (action === 'share') {
+          shareClip(clipId);
         } else if (action === 'star') {
           toggleClipStar(clipId);
         } else if (action === 'download') {
@@ -1651,24 +1779,30 @@
         }
       });
 
-      // Sort & Filter pills
-      els.sortBar.addEventListener('click', (e) => {
-        const pill = e.target.closest('.sort-pill');
-        if (!pill) return;
-        state.sortBy = pill.dataset.sort;
+      // Audio Element Playback Progress & Ended Events
+      els.clipAudioPlayer.addEventListener('timeupdate', () => {
+        if (!state.playingClipId) return;
+        const duration = els.clipAudioPlayer.duration;
+        const current = els.clipAudioPlayer.currentTime;
+        if (!duration || !Number.isFinite(duration)) return;
 
-        els.sortBar.querySelectorAll('.sort-pill').forEach((el) => {
-          const active = el.dataset.sort === state.sortBy;
-          if (active && el.dataset.sort === 'favorites') {
-            el.className = 'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-400/35 transition';
-          } else if (active) {
-            el.className = 'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition';
-          } else {
-            el.className = 'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white/[0.06] text-slate-400 border border-white/10 hover:text-slate-200 transition';
-          }
-        });
+        const pct = Math.min(100, Math.max(0, (current / duration) * 100));
+        const bar = els.reelList.querySelector(`[data-progress-id="${state.playingClipId}"]`);
+        if (bar) {
+          bar.style.width = `${pct}%`;
+        }
+      });
 
-        renderHighlightReel();
+      els.clipAudioPlayer.addEventListener('ended', () => {
+        if (state.isPlayingReel) {
+          state.playingClipId = null;
+          renderHighlightReel();
+          state.reelGapTimeout = setTimeout(() => {
+            playNextInReel();
+          }, REEL_GAP_MS);
+        } else {
+          stopAllPlayback();
+        }
       });
 
       window.addEventListener('resize', resizeVisualizerCanvas);
@@ -1677,20 +1811,16 @@
       // Initialization
       // =========================================================================
       async function init() {
-        loadPreferences();
+        loadLocalSettings();
         renderStats();
         renderThresholdUI();
         resizeVisualizerCanvas();
 
-        state.clips = await loadClipsFromDB();
+        await loadClipsFromDB();
         renderHighlightReel();
       }
 
-      if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-      } else {
-        init();
-      }
+      init();
     })();
   </script>
 </body>
