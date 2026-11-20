@@ -287,7 +287,7 @@
       </p>
     </section>
 
-    <!-- 6. Highlight Reel Section at the Bottom -->
+    <!-- 5. Highlight Reel Section at the Bottom -->
     <section aria-label="Highlight Reel" class="flex-1 flex flex-col">
       <!-- Highlight Reel Header -->
       <div class="flex items-center justify-between gap-2 mb-2.5 px-0.5">
@@ -299,6 +299,20 @@
         <!-- Play All / Stop Reel Button -->
         <button
           id="playAllBtn"
+          type="button"
+          disabled
+          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md shadow-orange-500/20 hover:brightness-110 active:scale-95 disabled:opacity-35 disabled:pointer-events-none transition"
+        >
+          <svg id="playAllIcon" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M8 5.14v14l11-7-11-7z" />
+          </svg>
+          <svg id="stopAllIcon" class="hidden w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+            <rect x="6" y="6" width="12" height="12" rx="2" />
+          </svg>
+          <span id="playAllBtnText">Play All</span>
+        </button>
+      </div>
+
       <!-- Sort & Filter Pills -->
       <div id="sortBar" class="hidden flex flex-wrap items-center gap-1.5 mb-2.5">
         <button type="button" data-sort="newest" class="sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition">
@@ -382,9 +396,10 @@
 
   <script>
     /**
-     * FartCount Web App — PCM-to-WAV Highlight Reel Edition
-     * Captures individual fart clips with a ~0.25s pre-roll buffer, encodes to 16-bit mono WAV,
-     * persists clips in IndexedDB, and supports smooth playback on iOS Safari & desktop browsers.
+     * FartCount Web App v0.2 — Fast-Transient PCM-to-WAV Highlight Reel Edition
+     * Captures individual fart clips (down to 50ms quick pops) with a ~0.25s pre-roll buffer,
+     * encodes to 16-bit mono WAV, persists clips & favorites in IndexedDB, and supports
+     * smooth loudspeaker playback on iOS Safari & desktop browsers.
      */
     (function () {
       'use strict';
@@ -401,12 +416,12 @@
       const DB_VERSION = 1;
       const STORE_NAME = 'clips';
 
-      const PRE_ROLL_SECONDS = 0.25;      // Rolling ~0.25s pre-roll so starts are never clipped
-      const POST_ROLL_TAIL_SECONDS = 0.30;// ~0.30s post-roll tail so even quick 0.05s pops are clearly audible
-      const MIN_FART_DURATION_MS = 50;    // 0.05s (50ms) minimum to catch quick squeakers & short pops
-      const SILENCE_DEBOUNCE_MS = 300;    // 0.30s quiet window before finalizing clip
-      const REEL_GAP_MS = 350;            // Short pause between clips in "Play All" mode
-      const PCM_BUFFER_SIZE = 1024;       // ~23ms per chunk at 44.1kHz for fast transient detection
+      const PRE_ROLL_SECONDS = 0.25;       // Rolling ~0.25s pre-roll so starts are never clipped
+      const POST_ROLL_TAIL_SECONDS = 0.30; // ~0.30s post-roll tail so even quick 0.05s pops are clearly audible
+      const MIN_FART_DURATION_MS = 50;     // 0.05s (50ms) minimum to catch quick squeakers & short pops
+      const SILENCE_DEBOUNCE_MS = 300;     // 0.30s quiet window before finalizing clip
+      const REEL_GAP_MS = 350;             // Short pause between clips in "Play All" mode
+      const PCM_BUFFER_SIZE = 1024;        // ~23ms per chunk at 44.1kHz for fast transient detection
 
       // =========================================================================
       // Application State
@@ -420,14 +435,226 @@
         thresholdDB: 65,
         clips: [],        // Array of { id, timestamp, duration, peakDB, starred, blob, url }
         sortBy: 'newest', // 'newest' | 'favorites' | 'longest' | 'loudest'
-// ... existing code ... -->
+
+        // Recording & Web Audio State
+        isRecording: false,
+        audioContext: null,
+        mediaStream: null,
+        sourceNode: null,
+        processorNode: null,
+        silentGainNode: null,
+        sampleRate: 44100,
+        recordStartTime: 0,
+        recordTimerInterval: null,
+        rafId: null,
+
+        // Live Meter & Visualizer History
+        latestDisplayDB: 0,
+        smoothedDisplayDB: 0,
+        visualizerBars: new Array(36).fill(0),
+
+        // Active Fart Detection & Ring Buffer
+        preRollChunks: [],
+        preRollSamples: 0,
+        isDetectingEvent: false,
+        eventStartTime: 0,
+        lastLoudTime: 0,
+        currentEventPeakDB: 0,
+        activeClipChunks: [],
+        activeClipSamples: 0,
+
+        // Playback State
+        playingClipId: null,
+        isPlayingReel: false,
+        reelQueue: [],
+        reelGapTimeout: null,
+        toastTimeout: null,
+      };
+
+      // =========================================================================
+      // DOM Element References
+      // =========================================================================
+      const els = {
+        shareBtn: document.getElementById('shareBtn'),
+        resetBtn: document.getElementById('resetBtn'),
+        errorBanner: document.getElementById('errorBanner'),
+        errorBannerText: document.getElementById('errorBannerText'),
+
+        cardTotal: document.getElementById('cardTotal'),
+        cardLongest: document.getElementById('cardLongest'),
+        cardLoudest: document.getElementById('cardLoudest'),
+        statTotal: document.getElementById('statTotal'),
+        statLongest: document.getElementById('statLongest'),
+        statLoudest: document.getElementById('statLoudest'),
+
+        meterCard: document.getElementById('meterCard'),
+        statusBadge: document.getElementById('statusBadge'),
+        statusDot: document.getElementById('statusDot'),
+        statusText: document.getElementById('statusText'),
+        liveDbValue: document.getElementById('liveDbValue'),
+        visualizerContainer: document.getElementById('visualizerContainer'),
+        visualizerCanvas: document.getElementById('visualizerCanvas'),
+        meterFill: document.getElementById('meterFill'),
+        thresholdMarker: document.getElementById('thresholdMarker'),
+        thresholdSlider: document.getElementById('thresholdSlider'),
+        thresholdValue: document.getElementById('thresholdValue'),
+
+        recordBtn: document.getElementById('recordBtn'),
+        recordPulseRing: document.getElementById('recordPulseRing'),
+        micIcon: document.getElementById('micIcon'),
+        stopIcon: document.getElementById('stopIcon'),
+        recordBtnLabel: document.getElementById('recordBtnLabel'),
+        recordTimer: document.getElementById('recordTimer'),
+        recordHint: document.getElementById('recordHint'),
+
+        reelCountBadge: document.getElementById('reelCountBadge'),
+        playAllBtn: document.getElementById('playAllBtn'),
+        playAllIcon: document.getElementById('playAllIcon'),
+        stopAllIcon: document.getElementById('stopAllIcon'),
         playAllBtnText: document.getElementById('playAllBtnText'),
         sortBar: document.getElementById('sortBar'),
         favoritesCountText: document.getElementById('favoritesCountText'),
         emptyReelState: document.getElementById('emptyReelState'),
         emptyFavoritesState: document.getElementById('emptyFavoritesState'),
         reelList: document.getElementById('reelList'),
-// ... existing code ... -->
+
+        clipAudioPlayer: document.getElementById('clipAudioPlayer'),
+        resetModal: document.getElementById('resetModal'),
+        cancelResetBtn: document.getElementById('cancelResetBtn'),
+        confirmResetBtn: document.getElementById('confirmResetBtn'),
+        toast: document.getElementById('toast'),
+      };
+
+      // =========================================================================
+      // Utility & Formatting Helpers
+      // =========================================================================
+      function showError(message) {
+        els.errorBannerText.textContent = message;
+        els.errorBanner.classList.remove('hidden');
+      }
+
+      function clearError() {
+        els.errorBanner.classList.add('hidden');
+        els.errorBannerText.textContent = '';
+      }
+
+      function showToast(message) {
+        els.toast.textContent = message;
+        els.toast.classList.remove('opacity-0', 'translate-y-2');
+        els.toast.classList.add('opacity-100', 'translate-y-0');
+
+        if (state.toastTimeout) clearTimeout(state.toastTimeout);
+        state.toastTimeout = setTimeout(() => {
+          els.toast.classList.add('opacity-0', 'translate-y-2');
+          els.toast.classList.remove('opacity-100', 'translate-y-0');
+        }, 2300);
+      }
+
+      function formatTimer(ms) {
+        const totalSeconds = Math.floor(ms / 1000);
+        const mins = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
+        const secs = String(totalSeconds % 60).padStart(2, '0');
+        return `${mins}:${secs}`;
+      }
+
+      function formatTimestamp(isoString) {
+        try {
+          const date = new Date(isoString);
+          const now = new Date();
+          const isToday = date.toDateString() === now.toDateString();
+          const timeStr = date.toLocaleTimeString([], {
+            hour: 'numeric',
+            minute: '2-digit',
+            second: '2-digit',
+          });
+          if (isToday) return `Today at ${timeStr}`;
+          const dateStr = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+          return `${dateStr} • ${timeStr}`;
+        } catch {
+          return 'Just now';
+        }
+      }
+
+      function flashStatCard(cardEl, ringClass) {
+        cardEl.classList.add('ring-2', ringClass, 'scale-[1.03]');
+        setTimeout(() => {
+          cardEl.classList.remove('ring-2', ringClass, 'scale-[1.03]');
+        }, 420);
+      }
+
+      // =========================================================================
+      // LocalStorage Persistence (Stats & Threshold)
+      // =========================================================================
+      function loadPreferences() {
+        try {
+          const savedStats = localStorage.getItem(STORAGE_KEYS.STATS);
+          if (savedStats) {
+            const parsed = JSON.parse(savedStats);
+            state.stats.totalFarts = Number(parsed.totalFarts) || 0;
+            state.stats.longestFart = Number(parsed.longestFart) || 0;
+            state.stats.loudestFart = Number(parsed.loudestFart) || 0;
+          }
+          const savedThreshold = localStorage.getItem(STORAGE_KEYS.THRESHOLD);
+          if (savedThreshold !== null) {
+            const val = Number(savedThreshold);
+            if (!Number.isNaN(val) && val >= 35 && val <= 95) {
+              state.thresholdDB = val;
+            }
+          }
+        } catch (err) {
+          console.warn('Could not load saved preferences:', err);
+        }
+      }
+
+      function saveStats() {
+        try {
+          localStorage.setItem(STORAGE_KEYS.STATS, JSON.stringify(state.stats));
+        } catch (err) {
+          console.warn('Could not save stats:', err);
+        }
+      }
+
+      function saveThreshold() {
+        try {
+          localStorage.setItem(STORAGE_KEYS.THRESHOLD, String(state.thresholdDB));
+        } catch (err) {
+          console.warn('Could not save threshold:', err);
+        }
+      }
+
+      function renderStats() {
+        els.statTotal.textContent = String(state.stats.totalFarts);
+        els.statLongest.textContent = `${state.stats.longestFart.toFixed(2)}s`;
+        els.statLoudest.textContent = `${Math.round(state.stats.loudestFart)} dB`;
+      }
+
+      function renderThresholdUI() {
+        els.thresholdSlider.value = String(state.thresholdDB);
+        els.thresholdValue.textContent = `${state.thresholdDB} dB`;
+        els.thresholdMarker.style.left = `${state.thresholdDB}%`;
+      }
+
+      // =========================================================================
+      // IndexedDB Persistence for WAV Highlight Clips
+      // =========================================================================
+      function openDatabase() {
+        return new Promise((resolve, reject) => {
+          if (!('indexedDB' in window)) {
+            reject(new Error('IndexedDB not supported'));
+            return;
+          }
+          const request = indexedDB.open(DB_NAME, DB_VERSION);
+          request.onupgradeneeded = (event) => {
+            const db = event.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+              db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+            }
+          };
+          request.onsuccess = (event) => resolve(event.target.result);
+          request.onerror = (event) => reject(event.target.error);
+        });
+      }
+
       async function saveClipToDB(clipRecord) {
         try {
           const db = await openDatabase();
@@ -461,7 +688,6 @@
                 starred: Boolean(item.starred),
                 url: item.blob ? URL.createObjectURL(item.blob) : '',
               }));
-              // Sort newest first initially
               items.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
               resolve(items);
             };
@@ -472,7 +698,158 @@
           return [];
         }
       }
-// ... existing code ... -->
+
+      async function deleteClipFromDB(clipId) {
+        try {
+          const db = await openDatabase();
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).delete(clipId);
+            tx.oncomplete = () => resolve();
+            tx.onerror = (e) => reject(e.target.error);
+          });
+        } catch (err) {
+          console.warn('IndexedDB delete failed:', err);
+        }
+      }
+
+      async function clearAllClipsFromDB() {
+        try {
+          const db = await openDatabase();
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).clear();
+            tx.oncomplete = () => resolve();
+            tx.onerror = (e) => reject(e.target.error);
+          });
+        } catch (err) {
+          console.warn('IndexedDB clear failed:', err);
+        }
+      }
+
+      // =========================================================================
+      // PCM Ring Buffer & 16-bit Mono WAV Encoder
+      // =========================================================================
+      function pushToPreRoll(chunk) {
+        const maxPreRollSamples = Math.ceil(PRE_ROLL_SECONDS * state.sampleRate);
+        state.preRollChunks.push(chunk);
+        state.preRollSamples += chunk.length;
+
+        while (state.preRollSamples > maxPreRollSamples && state.preRollChunks.length > 1) {
+          const removed = state.preRollChunks.shift();
+          state.preRollSamples -= removed.length;
+        }
+      }
+
+      function mergeFloat32Chunks(chunks, maxSamples) {
+        let totalLength = 0;
+        for (let i = 0; i < chunks.length; i++) {
+          totalLength += chunks[i].length;
+        }
+        const finalLength = maxSamples ? Math.min(totalLength, maxSamples) : totalLength;
+        const result = new Float32Array(finalLength);
+        let offset = 0;
+        for (let i = 0; i < chunks.length && offset < finalLength; i++) {
+          const remaining = finalLength - offset;
+          if (chunks[i].length <= remaining) {
+            result.set(chunks[i], offset);
+            offset += chunks[i].length;
+          } else {
+            result.set(chunks[i].subarray(0, remaining), offset);
+            offset += remaining;
+          }
+        }
+        return result;
+      }
+
+      function encodeMonoWAV(samples, sampleRate) {
+        const buffer = new ArrayBuffer(44 + samples.length * 2);
+        const view = new DataView(buffer);
+
+        function writeString(offset, str) {
+          for (let i = 0; i < str.length; i++) {
+            view.setUint8(offset + i, str.charCodeAt(i));
+          }
+        }
+
+        // RIFF chunk descriptor
+        writeString(0, 'RIFF');
+        view.setUint32(4, 36 + samples.length * 2, true);
+        writeString(8, 'WAVE');
+
+        // fmt sub-chunk
+        writeString(12, 'fmt ');
+        view.setUint32(16, 16, true); // PCM
+        view.setUint16(20, 1, true);  // AudioFormat = 1 (PCM)
+        view.setUint16(22, 1, true);  // NumChannels = 1 (Mono)
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * 2, true); // ByteRate
+        view.setUint16(32, 2, true);  // BlockAlign
+        view.setUint16(34, 16, true); // BitsPerSample
+
+        // data sub-chunk
+        writeString(36, 'data');
+        view.setUint32(40, samples.length * 2, true);
+
+        // Convert Float32 [-1.0, 1.0] to Int16
+        let offset = 44;
+        for (let i = 0; i < samples.length; i++, offset += 2) {
+          const s = Math.max(-1, Math.min(1, samples[i]));
+          view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        }
+
+        return new Blob([view], { type: 'audio/wav' });
+      }
+
+      // =========================================================================
+      // UI Status & Visualizer Canvas
+      // =========================================================================
+      function updateStatusUI(mode) {
+        if (mode === 'detecting') {
+          els.statusBadge.className = 'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-orange-500/20 text-orange-300 border border-orange-400/30 transition-colors';
+          els.statusDot.className = 'w-2 h-2 rounded-full bg-orange-400 animate-ping';
+          els.statusText.textContent = 'Fart Detected!';
+          els.meterFill.className = 'h-full rounded-full bg-gradient-to-r from-orange-500 to-amber-400 transition-[width] duration-75 ease-out';
+          els.meterCard.classList.add('border-orange-500/40');
+          els.meterCard.classList.remove('border-white/10');
+        } else if (mode === 'listening') {
+          els.statusBadge.className = 'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-colors';
+          els.statusDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+          els.statusText.textContent = 'Listening...';
+          els.meterFill.className = 'h-full rounded-full bg-gradient-to-r from-emerald-500 to-green-400 transition-[width] duration-75 ease-out';
+          els.meterCard.classList.remove('border-orange-500/40');
+          els.meterCard.classList.add('border-white/10');
+        } else {
+          els.statusBadge.className = 'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-white/10 text-slate-300 transition-colors';
+          els.statusDot.className = 'w-2 h-2 rounded-full bg-slate-400';
+          els.statusText.textContent = 'Ready';
+          els.meterFill.className = 'h-full rounded-full bg-gradient-to-r from-emerald-500 to-green-400 transition-[width] duration-75 ease-out';
+          els.meterCard.classList.remove('border-orange-500/40');
+          els.meterCard.classList.add('border-white/10');
+        }
+      }
+
+      function updateRecordButtonUI() {
+        if (state.isRecording) {
+          els.recordPulseRing.classList.remove('hidden');
+          els.micIcon.classList.add('hidden');
+          els.stopIcon.classList.remove('hidden');
+          els.recordBtnLabel.textContent = 'Stop';
+          els.recordTimer.classList.remove('hidden');
+          els.recordBtn.className = 'relative z-10 w-32 h-32 rounded-full bg-gradient-to-b from-rose-500 to-red-600 shadow-[0_12px_35px_rgba(244,63,94,0.45)] border-4 border-white/25 flex flex-col items-center justify-center gap-1 active:scale-95 transition-all duration-200 select-none';
+          els.recordHint.textContent = 'Listening live — tap Stop before playing clips';
+        } else {
+          els.recordPulseRing.classList.add('hidden');
+          els.micIcon.classList.remove('hidden');
+          els.stopIcon.classList.add('hidden');
+          els.recordBtnLabel.textContent = 'Record';
+          els.recordTimer.classList.add('hidden');
+          els.recordTimer.textContent = '00:00';
+          els.recordBtn.className = 'relative z-10 w-32 h-32 rounded-full bg-gradient-to-b from-emerald-400 to-green-600 shadow-[0_12px_35px_rgba(16,185,129,0.4)] border-4 border-white/20 flex flex-col items-center justify-center gap-1 active:scale-95 transition-all duration-200 select-none';
+          els.recordHint.textContent = 'Captures each fart automatically into your Highlight Reel';
+        }
+      }
+
       function updatePlayAllButtonUI() {
         const visibleClips = getSortedClips();
         els.playAllBtn.disabled = visibleClips.length === 0;
@@ -488,7 +865,93 @@
           els.playAllBtn.className = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md shadow-orange-500/20 hover:brightness-110 active:scale-95 disabled:opacity-35 disabled:pointer-events-none transition';
         }
       }
-// ... existing code ... -->
+
+      function resizeVisualizerCanvas() {
+        const rect = els.visualizerContainer.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        els.visualizerCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
+        els.visualizerCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
+        drawVisualizerFrame();
+      }
+
+      function drawVisualizerFrame() {
+        const canvas = els.visualizerCanvas;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const width = canvas.width;
+        const height = canvas.height;
+        const dpr = window.devicePixelRatio || 1;
+
+        ctx.clearRect(0, 0, width, height);
+
+        // Draw subtle threshold guide line
+        const thresholdY = height - (state.thresholdDB / 100) * (height - 8 * dpr) - 4 * dpr;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+        ctx.lineWidth = Math.max(1, dpr);
+        ctx.setLineDash([4 * dpr, 4 * dpr]);
+        ctx.beginPath();
+        ctx.moveTo(0, thresholdY);
+        ctx.lineTo(width, thresholdY);
+        ctx.stroke();
+        ctx.restore();
+
+        // Draw rounded vertical bars
+        const bars = state.visualizerBars;
+        const count = bars.length;
+        const gap = 3 * dpr;
+        const totalGap = gap * (count + 1);
+        const barWidth = Math.max(2 * dpr, (width - totalGap) / count);
+
+        for (let i = 0; i < count; i++) {
+          const db = bars[i];
+          const normalized = Math.max(0.05, Math.min(1, db / 100));
+          const barHeight = normalized * (height - 10 * dpr);
+          const x = gap + i * (barWidth + gap);
+          const y = (height - barHeight) / 2;
+
+          const isLoud = db >= state.thresholdDB;
+          ctx.fillStyle = isLoud
+            ? '#FB923C' // orange-400
+            : state.isRecording
+            ? '#34D399' // emerald-400
+            : 'rgba(148, 163, 184, 0.25)';
+
+          ctx.beginPath();
+          const radius = Math.min(barWidth / 2, barHeight / 2);
+          ctx.roundRect(x, y, barWidth, barHeight, radius);
+          ctx.fill();
+        }
+      }
+
+      function startMeterAnimationLoop() {
+        let frameCount = 0;
+        function tick() {
+          if (!state.isRecording) return;
+
+          // Smooth meter slightly for visual polish while keeping detection instant
+          state.smoothedDisplayDB = state.smoothedDisplayDB * 0.55 + state.latestDisplayDB * 0.45;
+          const display = Math.round(state.smoothedDisplayDB);
+
+          els.liveDbValue.textContent = String(display);
+          els.meterFill.style.width = `${Math.max(0, Math.min(100, state.smoothedDisplayDB))}%`;
+
+          frameCount++;
+          if (frameCount % 2 === 0) {
+            state.visualizerBars.shift();
+            state.visualizerBars.push(state.latestDisplayDB);
+          }
+
+          drawVisualizerFrame();
+          state.rafId = requestAnimationFrame(tick);
+        }
+        state.rafId = requestAnimationFrame(tick);
+      }
+
+      // =========================================================================
+      // Real-Time PCM Audio Processing & Event Finalization
+      // =========================================================================
       function handleAudioProcess(audioProcessingEvent) {
         if (!state.isRecording) return;
 
@@ -587,13 +1050,168 @@
           blob: wavBlob,
           url: clipUrl,
         };
-// ... existing code ... -->
+
+        // Update stats
+        state.stats.totalFarts += 1;
+        flashStatCard(els.cardTotal, 'ring-emerald-400/70');
+
+        if (durationSec > state.stats.longestFart) {
+          state.stats.longestFart = durationSec;
+          flashStatCard(els.cardLongest, 'ring-sky-400/70');
+        }
+        if (peakDB > state.stats.loudestFart) {
+          state.stats.loudestFart = peakDB;
+          flashStatCard(els.cardLoudest, 'ring-orange-400/70');
+        }
+
+        saveStats();
+        renderStats();
+
+        // Add to Highlight Reel & persist to IndexedDB
+        state.clips.unshift(newClip);
+        renderHighlightReel(newClip.id);
+        await saveClipToDB(newClip);
+      }
+
+      // =========================================================================
+      // Start & Stop Microphone Recording (iOS Safari Compatible)
+      // =========================================================================
+      async function startRecording() {
+        clearError();
+        stopAllPlayback();
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          showError('Microphone access requires HTTPS (or localhost). Open this page over HTTPS in Safari to record.');
+          return;
+        }
+
+        try {
+          // Request raw microphone stream without aggressive browser filtering
+          let stream;
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              audio: {
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+              },
+            });
+          } catch {
+            // Fallback for older iOS Safari constraints
+            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          }
+
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          const audioContext = new AudioCtx();
+          if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+          }
+
+          state.audioContext = audioContext;
+          state.mediaStream = stream;
+          state.sampleRate = audioContext.sampleRate || 44100;
+
+          // Reset rolling buffers
+          state.preRollChunks = [];
+          state.preRollSamples = 0;
+          state.isDetectingEvent = false;
+          state.activeClipChunks = [];
+          state.activeClipSamples = 0;
+          state.latestDisplayDB = 0;
+          state.smoothedDisplayDB = 0;
+
           // Build Web Audio graph: Source -> ScriptProcessor (1024 samples ~23ms) -> SilentGain (0) -> Destination
-          const source = state.audioContext.createMediaStreamSource(stream);
-          const processor = state.audioContext.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
-          const silentGain = state.audioContext.createGain();
+          const source = audioContext.createMediaStreamSource(stream);
+          const processor = audioContext.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
+          const silentGain = audioContext.createGain();
           silentGain.gain.value = 0;
-// ... existing code ... -->
+
+          processor.onaudioprocess = handleAudioProcess;
+
+          source.connect(processor);
+          processor.connect(silentGain);
+          silentGain.connect(audioContext.destination);
+
+          state.sourceNode = source;
+          state.processorNode = processor;
+          state.silentGainNode = silentGain;
+          state.isRecording = true;
+
+          // Start session timer
+          state.recordStartTime = Date.now();
+          els.recordTimer.textContent = '00:00';
+          state.recordTimerInterval = setInterval(() => {
+            els.recordTimer.textContent = formatTimer(Date.now() - state.recordStartTime);
+          }, 250);
+
+          updateRecordButtonUI();
+          updateStatusUI('listening');
+          startMeterAnimationLoop();
+        } catch (err) {
+          console.error('Microphone error:', err);
+          if (err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')) {
+            showError('Microphone permission was denied. Enable mic access for Safari in iPhone Settings and reload.');
+          } else {
+            showError(`Could not access microphone: ${err.message || 'Unknown error'}`);
+          }
+          stopRecording();
+        }
+      }
+
+      function stopRecording() {
+        if (state.isDetectingEvent) {
+          finalizeFartClip();
+        }
+
+        state.isRecording = false;
+
+        if (state.rafId) {
+          cancelAnimationFrame(state.rafId);
+          state.rafId = null;
+        }
+        if (state.recordTimerInterval) {
+          clearInterval(state.recordTimerInterval);
+          state.recordTimerInterval = null;
+        }
+
+        // Disconnect Web Audio nodes
+        try {
+          if (state.processorNode) {
+            state.processorNode.onaudioprocess = null;
+            state.processorNode.disconnect();
+          }
+          if (state.sourceNode) state.sourceNode.disconnect();
+          if (state.silentGainNode) state.silentGainNode.disconnect();
+        } catch (err) {
+          console.warn('Error disconnecting audio nodes:', err);
+        }
+
+        // Stop all microphone tracks so iOS Safari routes audio back to the main loudspeaker
+        if (state.mediaStream) {
+          state.mediaStream.getTracks().forEach((track) => track.stop());
+          state.mediaStream = null;
+        }
+
+        if (state.audioContext) {
+          state.audioContext.close().catch(() => {});
+          state.audioContext = null;
+        }
+
+        state.sourceNode = null;
+        state.processorNode = null;
+        state.silentGainNode = null;
+        state.latestDisplayDB = 0;
+        state.smoothedDisplayDB = 0;
+        state.visualizerBars.fill(0);
+
+        els.liveDbValue.textContent = '0';
+        els.meterFill.style.width = '0%';
+        drawVisualizerFrame();
+
+        updateRecordButtonUI();
+        updateStatusUI('ready');
+      }
+
       // =========================================================================
       // Highlight Reel Rendering, Record Badges, Favorites & Sorting
       // =========================================================================
@@ -777,7 +1395,62 @@
           })
           .join('');
       }
-// ... existing code ... -->
+
+      // =========================================================================
+      // Clip & Sequential Highlight Reel Playback
+      // =========================================================================
+      function stopAllPlayback() {
+        if (state.reelGapTimeout) {
+          clearTimeout(state.reelGapTimeout);
+          state.reelGapTimeout = null;
+        }
+        els.clipAudioPlayer.pause();
+        els.clipAudioPlayer.currentTime = 0;
+        state.playingClipId = null;
+        state.isPlayingReel = false;
+        state.reelQueue = [];
+        renderHighlightReel();
+      }
+
+      function playClipById(clipId, fromReel = false) {
+        // Toggle pause if tapping the currently playing clip
+        if (!fromReel && state.playingClipId === clipId) {
+          stopAllPlayback();
+          return;
+        }
+
+        const clip = state.clips.find((c) => c.id === clipId);
+        if (!clip || !clip.url) return;
+
+        // Always stop recording first so iOS Safari routes audio back to loudspeaker
+        if (state.isRecording) {
+          stopRecording();
+        }
+
+        if (!fromReel) {
+          if (state.reelGapTimeout) {
+            clearTimeout(state.reelGapTimeout);
+            state.reelGapTimeout = null;
+          }
+          state.isPlayingReel = false;
+          state.reelQueue = [];
+        }
+
+        state.playingClipId = clip.id;
+        renderHighlightReel();
+
+        els.clipAudioPlayer.src = clip.url;
+        els.clipAudioPlayer.currentTime = 0;
+        const playPromise = els.clipAudioPlayer.play();
+        if (playPromise && typeof playPromise.catch === 'function') {
+          playPromise.catch((err) => {
+            console.warn('Playback blocked:', err);
+            showToast('Tap Play again to enable audio');
+            stopAllPlayback();
+          });
+        }
+      }
+
       function togglePlayAllReel() {
         if (state.isPlayingReel) {
           stopAllPlayback();
@@ -799,7 +1472,35 @@
           playClipById(firstId, true);
         }
       }
-// ... existing code ... -->
+
+      // Update mini progress bar during playback
+      els.clipAudioPlayer.addEventListener('timeupdate', () => {
+        if (!state.playingClipId) return;
+        const duration = els.clipAudioPlayer.duration;
+        if (!duration || !Number.isFinite(duration)) return;
+        const pct = Math.min(100, Math.max(0, (els.clipAudioPlayer.currentTime / duration) * 100));
+        const bar = els.reelList.querySelector(`[data-progress-id="${state.playingClipId}"]`);
+        if (bar) {
+          bar.style.width = `${pct}%`;
+        }
+      });
+
+      // Handle clip end (advance queue if in Play All / Play Favorites mode)
+      els.clipAudioPlayer.addEventListener('ended', () => {
+        if (state.isPlayingReel && state.reelQueue.length > 0) {
+          const nextId = state.reelQueue.shift();
+          state.playingClipId = null;
+          renderHighlightReel();
+          state.reelGapTimeout = setTimeout(() => {
+            if (state.isPlayingReel && nextId) {
+              playClipById(nextId, true);
+            }
+          }, REEL_GAP_MS);
+        } else {
+          stopAllPlayback();
+        }
+      });
+
       // =========================================================================
       // Clip Star (Favorite), Download (Save WAV) & Delete Actions
       // =========================================================================
@@ -814,7 +1515,123 @@
       }
 
       function downloadClipWav(clipId) {
-// ... existing code ... -->
+        const clip = state.clips.find((c) => c.id === clipId);
+        if (!clip || !clip.url) return;
+
+        const a = document.createElement('a');
+        a.href = clip.url;
+        a.download = `FartCount_${clip.duration.toFixed(2)}s_${Math.round(clip.peakDB)}dB.wav`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        showToast('Saved WAV clip!');
+      }
+
+      async function deleteClip(clipId) {
+        if (state.playingClipId === clipId) {
+          stopAllPlayback();
+        }
+        const idx = state.clips.findIndex((c) => c.id === clipId);
+        if (idx === -1) return;
+
+        const [removed] = state.clips.splice(idx, 1);
+        if (removed && removed.url) {
+          URL.revokeObjectURL(removed.url);
+        }
+
+        await deleteClipFromDB(clipId);
+        renderHighlightReel();
+        showToast('Clip deleted');
+      }
+
+      // =========================================================================
+      // Share Score & Reset All
+      // =========================================================================
+      async function shareScore() {
+        const text = `💨 My FartCount Stats:\n• Total Farts: ${state.stats.totalFarts}\n• Longest: ${state.stats.longestFart.toFixed(2)}s\n• Loudest: ${Math.round(state.stats.loudestFart)} dB\n\nTry FartCount: ${window.location.href}`;
+
+        if (navigator.share) {
+          try {
+            await navigator.share({
+              title: 'FartCount Stats',
+              text: text,
+            });
+            return;
+          } catch (err) {
+            if (err && err.name === 'AbortError') return;
+          }
+        }
+
+        // Reliable clipboard fallback (works inside iframes too)
+        try {
+          const textarea = document.createElement('textarea');
+          textarea.value = text;
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.focus();
+          textarea.select();
+          document.execCommand('copy');
+          document.body.removeChild(textarea);
+          showToast('Stats copied to clipboard!');
+        } catch {
+          showToast('Could not copy stats');
+        }
+      }
+
+      async function resetAll() {
+        stopRecording();
+        stopAllPlayback();
+
+        state.stats = { totalFarts: 0, longestFart: 0, loudestFart: 0 };
+        saveStats();
+        renderStats();
+
+        state.clips.forEach((c) => {
+          if (c.url) URL.revokeObjectURL(c.url);
+        });
+        state.clips = [];
+        await clearAllClipsFromDB();
+
+        renderHighlightReel();
+        els.resetModal.classList.add('hidden');
+        showToast('All stats & clips cleared');
+      }
+
+      // =========================================================================
+      // Event Listeners
+      // =========================================================================
+      els.recordBtn.addEventListener('click', () => {
+        if (state.isRecording) {
+          stopRecording();
+        } else {
+          startRecording();
+        }
+      });
+
+      els.thresholdSlider.addEventListener('input', (e) => {
+        state.thresholdDB = Number(e.target.value);
+        renderThresholdUI();
+        saveThreshold();
+        drawVisualizerFrame();
+      });
+
+      els.playAllBtn.addEventListener('click', togglePlayAllReel);
+      els.shareBtn.addEventListener('click', shareScore);
+
+      els.resetBtn.addEventListener('click', () => {
+        els.resetModal.classList.remove('hidden');
+      });
+      els.cancelResetBtn.addEventListener('click', () => {
+        els.resetModal.classList.add('hidden');
+      });
+      els.confirmResetBtn.addEventListener('click', resetAll);
+      els.resetModal.addEventListener('click', (e) => {
+        if (e.target === els.resetModal) {
+          els.resetModal.classList.add('hidden');
+        }
+      });
+
       // Delegated events for Highlight Reel clip cards (Play, Star, Download, Delete)
       els.reelList.addEventListener('click', (e) => {
         const btn = e.target.closest('button[data-action]');
@@ -853,4 +1670,28 @@
 
         renderHighlightReel();
       });
-// ... existing code ... -->
+
+      window.addEventListener('resize', resizeVisualizerCanvas);
+
+      // =========================================================================
+      // Initialization
+      // =========================================================================
+      async function init() {
+        loadPreferences();
+        renderStats();
+        renderThresholdUI();
+        resizeVisualizerCanvas();
+
+        state.clips = await loadClipsFromDB();
+        renderHighlightReel();
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+      } else {
+        init();
+      }
+    })();
+  </script>
+</body>
+</html>
