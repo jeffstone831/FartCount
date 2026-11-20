@@ -125,7 +125,7 @@
         <div class="truncate">
           <div class="flex items-center gap-1.5">
             <h1 class="text-xl font-extrabold tracking-tight leading-tight">FartCount</h1>
-            <span class="px-1.5 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">v0.3</span>
+            <span class="px-1.5 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">v0.4</span>
           </div>
           <p class="text-[11px] font-medium text-slate-400">Acoustic Highlight Tracker</p>
         </div>
@@ -231,7 +231,7 @@
         <div
           id="thresholdMarker"
           class="absolute top-0 bottom-0 w-0.5 bg-white shadow-[0_0_8px_rgba(255,255,255,0.9)] pointer-events-none"
-          style="left: 65%"
+          style="left: 72%"
         ></div>
       </div>
 
@@ -239,7 +239,7 @@
       <div>
         <div class="flex items-center justify-between text-xs mb-1.5">
           <label for="thresholdSlider" class="font-semibold text-slate-300">Detection Threshold</label>
-          <span id="thresholdValue" class="font-mono font-bold text-emerald-400">65 dB</span>
+          <span id="thresholdValue" class="font-mono font-bold text-emerald-400">72 dB</span>
         </div>
         <input
           id="thresholdSlider"
@@ -247,7 +247,7 @@
           min="35"
           max="95"
           step="1"
-          value="65"
+          value="72"
           class="ios-slider w-full"
         />
         <div class="flex justify-between text-[10px] text-slate-500 mt-1">
@@ -396,9 +396,9 @@
 
   <script>
     /**
-     * FartCount Web App v0.3 — Fast-Transient PCM-to-WAV Highlight Reel + Native WAV Share Edition
+     * FartCount Web App v0.4 — Highlight-Synced Stats, Clean WAV Share & Tuned Default Sensitivity
      * Captures individual fart clips (down to 50ms quick pops) with a ~0.25s pre-roll buffer,
-     * encodes to 16-bit mono WAV, persists clips & favorites in IndexedDB, shares WAV + rich stats,
+     * encodes to 16-bit mono WAV, persists clips & favorites in IndexedDB, shares WAV + simple stats,
      * and supports smooth loudspeaker playback on iOS Safari & desktop browsers.
      */
     (function () {
@@ -408,8 +408,7 @@
       // Configuration & Constants
       // =========================================================================
       const STORAGE_KEYS = {
-        STATS: 'fartcount_stats_v2',
-        THRESHOLD: 'fartcount_threshold_v2',
+        THRESHOLD: 'fartcount_threshold_v4',
       };
 
       const DB_NAME = 'FartCountHighlightDB';
@@ -432,7 +431,7 @@
           longestFart: 0, // seconds
           loudestFart: 0, // dB (0-100 scale)
         },
-        thresholdDB: 65,
+        thresholdDB: 72,
         clips: [],        // Array of { id, timestamp, duration, peakDB, starred, blob, url }
         sortBy: 'newest', // 'newest' | 'favorites' | 'longest' | 'loudest'
 
@@ -479,14 +478,12 @@
         resetBtn: document.getElementById('resetBtn'),
         errorBanner: document.getElementById('errorBanner'),
         errorBannerText: document.getElementById('errorBannerText'),
-
         cardTotal: document.getElementById('cardTotal'),
         cardLongest: document.getElementById('cardLongest'),
         cardLoudest: document.getElementById('cardLoudest'),
         statTotal: document.getElementById('statTotal'),
         statLongest: document.getElementById('statLongest'),
         statLoudest: document.getElementById('statLoudest'),
-
         meterCard: document.getElementById('meterCard'),
         statusBadge: document.getElementById('statusBadge'),
         statusDot: document.getElementById('statusDot'),
@@ -498,7 +495,6 @@
         thresholdMarker: document.getElementById('thresholdMarker'),
         thresholdSlider: document.getElementById('thresholdSlider'),
         thresholdValue: document.getElementById('thresholdValue'),
-
         recordBtn: document.getElementById('recordBtn'),
         recordPulseRing: document.getElementById('recordPulseRing'),
         micIcon: document.getElementById('micIcon'),
@@ -506,7 +502,6 @@
         recordBtnLabel: document.getElementById('recordBtnLabel'),
         recordTimer: document.getElementById('recordTimer'),
         recordHint: document.getElementById('recordHint'),
-
         reelCountBadge: document.getElementById('reelCountBadge'),
         playAllBtn: document.getElementById('playAllBtn'),
         playAllIcon: document.getElementById('playAllIcon'),
@@ -517,7 +512,6 @@
         emptyReelState: document.getElementById('emptyReelState'),
         emptyFavoritesState: document.getElementById('emptyFavoritesState'),
         reelList: document.getElementById('reelList'),
-
         clipAudioPlayer: document.getElementById('clipAudioPlayer'),
         resetModal: document.getElementById('resetModal'),
         cancelResetBtn: document.getElementById('cancelResetBtn'),
@@ -526,49 +520,55 @@
       };
 
       // =========================================================================
-      // Utility & Formatting Helpers
+      // Utility & Feedback Helpers
       // =========================================================================
-      function showError(message) {
-        els.errorBannerText.textContent = message;
-        els.errorBanner.classList.remove('hidden');
-      }
-
-      function clearError() {
-        els.errorBanner.classList.add('hidden');
-        els.errorBannerText.textContent = '';
-      }
-
-      function showToast(message) {
-        els.toast.textContent = message;
-        els.toast.classList.remove('opacity-0', 'translate-y-2');
-        els.toast.classList.add('opacity-100', 'translate-y-0');
-
-        if (state.toastTimeout) clearTimeout(state.toastTimeout);
-        state.toastTimeout = setTimeout(() => {
-          els.toast.classList.add('opacity-0', 'translate-y-2');
-          els.toast.classList.remove('opacity-100', 'translate-y-0');
-        }, 2300);
-      }
-
-      function formatTimer(ms) {
-        const totalSeconds = Math.floor(ms / 1000);
-        const mins = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
-        const secs = String(totalSeconds % 60).padStart(2, '0');
-        return `${mins}:${secs}`;
-      }
-
       function formatClipDuration(seconds) {
-        const ms = Math.round(seconds * 1000);
-        if (ms < 1000) {
-          return `${ms}ms`;
+        if (!Number.isFinite(seconds) || seconds <= 0) return '0ms';
+        if (seconds < 1) {
+          return `${Math.round(seconds * 1000)}ms`;
         }
         return `${seconds.toFixed(2)}s`;
       }
 
+      function formatTimer(ms) {
+        const totalSec = Math.max(0, Math.floor(ms / 1000));
+        const mins = String(Math.floor(totalSec / 60)).padStart(2, '0');
+        const secs = String(totalSec % 60).padStart(2, '0');
+        return `${mins}:${secs}`;
+      }
+
+      function formatTimestamp(isoString) {
+        try {
+          const date = new Date(isoString);
+          const now = new Date();
+          const isSameDay =
+            date.getFullYear() === now.getFullYear() &&
+            date.getMonth() === now.getMonth() &&
+            date.getDate() === now.getDate();
+
+          const timeStr = date.toLocaleTimeString([], {
+            hour: 'numeric',
+            minute: '2-digit',
+          });
+
+          if (isSameDay) {
+            return `Today, ${timeStr}`;
+          }
+
+          const dateStr = date.toLocaleDateString([], {
+            month: 'short',
+            day: 'numeric',
+          });
+          return `${dateStr}, ${timeStr}`;
+        } catch {
+          return '';
+        }
+      }
+
       function getClipFilename(clip) {
-        const durTag = formatClipDuration(clip.duration);
-        const dbTag = `${Math.round(clip.peakDB)}dB`;
-        return `FartCount_${durTag}_${dbTag}.wav`;
+        const durLabel = formatClipDuration(clip.duration);
+        const dbLabel = `${Math.round(clip.peakDB)}dB`;
+        return `FartCount_${durLabel}_${dbLabel}.wav`;
       }
 
       function copyTextToClipboard(text) {
@@ -577,51 +577,58 @@
           textarea.value = text;
           textarea.setAttribute('readonly', '');
           textarea.style.position = 'fixed';
-          textarea.style.opacity = '0';
+          textarea.style.top = '-9999px';
+          textarea.style.left = '-9999px';
           document.body.appendChild(textarea);
-          textarea.focus();
           textarea.select();
+          textarea.setSelectionRange(0, text.length);
           const ok = document.execCommand('copy');
           document.body.removeChild(textarea);
           return ok;
-        } catch {
+        } catch (err) {
+          console.warn('Clipboard copy failed:', err);
           return false;
         }
       }
 
-      function formatTimestamp(isoString) {
-        try {
-          const date = new Date(isoString);
-          return date.toLocaleString(undefined, {
-            month: 'short',
-            day: 'numeric',
-            hour: 'numeric',
-            minute: '2-digit',
-          });
-        } catch {
-          return 'Just now';
+      function showToast(message) {
+        if (!els.toast) return;
+        els.toast.textContent = message;
+        els.toast.classList.remove('opacity-0', 'translate-y-2');
+        els.toast.classList.add('opacity-100', 'translate-y-0');
+
+        if (state.toastTimeout) {
+          clearTimeout(state.toastTimeout);
         }
+        state.toastTimeout = setTimeout(() => {
+          els.toast.classList.add('opacity-0', 'translate-y-2');
+          els.toast.classList.remove('opacity-100', 'translate-y-0');
+        }, 2400);
       }
 
-      function flashStatCard(cardEl, colorRingClass) {
-        cardEl.classList.add('scale-[1.04]', colorRingClass);
+      function showError(message) {
+        els.errorBannerText.textContent = message;
+        els.errorBanner.classList.remove('hidden');
+      }
+
+      function clearError() {
+        els.errorBannerText.textContent = '';
+        els.errorBanner.classList.add('hidden');
+      }
+
+      function flashStatCard(cardEl, ringClass = 'ring-2') {
+        if (!cardEl) return;
+        cardEl.classList.add(ringClass, 'ring-emerald-400/70', 'scale-[1.03]');
         setTimeout(() => {
-          cardEl.classList.remove('scale-[1.04]', colorRingClass);
-        }, 420);
+          cardEl.classList.remove(ringClass, 'ring-emerald-400/70', 'scale-[1.03]');
+        }, 650);
       }
 
       // =========================================================================
-      // LocalStorage Persistence (Stats & Threshold)
+      // LocalStorage Persistence (Threshold) & Highlight-Derived Stats
       // =========================================================================
       function loadLocalSettings() {
         try {
-          const savedStats = localStorage.getItem(STORAGE_KEYS.STATS);
-          if (savedStats) {
-            const parsed = JSON.parse(savedStats);
-            state.stats.totalFarts = Number(parsed.totalFarts) || 0;
-            state.stats.longestFart = Number(parsed.longestFart) || 0;
-            state.stats.loudestFart = Number(parsed.loudestFart) || 0;
-          }
           const savedThreshold = localStorage.getItem(STORAGE_KEYS.THRESHOLD);
           if (savedThreshold !== null) {
             const val = Number(savedThreshold);
@@ -634,12 +641,16 @@
         }
       }
 
-      function saveStats() {
-        try {
-          localStorage.setItem(STORAGE_KEYS.STATS, JSON.stringify(state.stats));
-        } catch (err) {
-          console.warn('Could not save stats:', err);
+      function recalculateStatsFromClips() {
+        let longest = 0;
+        let loudest = 0;
+        for (const clip of state.clips) {
+          if (clip.duration > longest) longest = clip.duration;
+          if (clip.peakDB > loudest) loudest = clip.peakDB;
         }
+        state.stats.totalFarts = state.clips.length;
+        state.stats.longestFart = longest;
+        state.stats.loudestFart = loudest;
       }
 
       function saveThreshold() {
@@ -1262,23 +1273,24 @@
 
         // Update stats
         state.stats.totalFarts += 1;
-        flashStatCard(els.cardTotal, 'ring-2');
+        // Track previous records for visual flash feedback
+        const prevLongest = state.stats.longestFart;
+        const prevLoudest = state.stats.loudestFart;
 
-        if (durationSec > state.stats.longestFart) {
-          state.stats.longestFart = durationSec;
+        // Add to Highlight Reel, derive top stats from saved clips & persist in IndexedDB
+        state.clips.unshift(clip);
+        recalculateStatsFromClips();
+        renderStats();
+        renderHighlightReel();
+
+        flashStatCard(els.cardTotal, 'ring-2');
+        if (durationSec > prevLongest) {
           flashStatCard(els.cardLongest, 'ring-2');
         }
-        if (peakDB > state.stats.loudestFart) {
-          state.stats.loudestFart = peakDB;
+        if (peakDB > prevLoudest) {
           flashStatCard(els.cardLoudest, 'ring-2');
         }
 
-        saveStats();
-        renderStats();
-
-        // Add to Highlight Reel & persist in IndexedDB
-        state.clips.unshift(clip);
-        renderHighlightReel();
         await saveClipToDB(clip);
 
         showToast(`Captured! ${formatClipDuration(durationSec)} • ${Math.round(peakDB)} dB`);
@@ -1562,29 +1574,19 @@
         const clip = state.clips.find((c) => c.id === clipId);
         if (!clip || !clip.blob) return;
 
-        const { longestId, loudestId } = getRecordHolderIds();
-        const tags = [];
-        if (clip.id === longestId) tags.push('🏆 Longest');
-        if (clip.id === loudestId) tags.push('🔊 Loudest');
-        if (clip.starred) tags.push('⭐ Favorite');
-        const badgeLine = tags.length ? ` (${tags.join(' • ')})` : '';
-
-        const ms = Math.round(clip.duration * 1000);
-        const durationRich = ms < 1000
-          ? `${ms}ms (${clip.duration.toFixed(2)}s)`
-          : `${clip.duration.toFixed(2)}s (${ms}ms)`;
+        const durationSecStr = `${clip.duration.toFixed(2)}s`;
         const dbRounded = Math.round(clip.peakDB);
         const appUrl = `${window.location.origin}${window.location.pathname}`;
         const filename = getClipFilename(clip);
 
-        const richText = `💨 FartCount Clip${badgeLine}\n⏱️ Length: ${durationRich}\n🔊 Peak: ${dbRounded} dB\n\nTry FartCount: ${appUrl}`;
+        const richText = `💨 ${durationSecStr} • ${dbRounded} dB\n\nTry FartCount: ${appUrl}`;
         const wavFile = new File([clip.blob], filename, { type: 'audio/wav' });
 
-        // Native iPhone / mobile Share Sheet with WAV file + rich caption
+        // Native iPhone / mobile Share Sheet with WAV file + simple stats caption
         if (navigator.share && navigator.canShare && navigator.canShare({ files: [wavFile] })) {
           try {
             await navigator.share({
-              title: `FartCount • ${formatClipDuration(clip.duration)} • ${dbRounded} dB`,
+              title: `FartCount • ${durationSecStr} • ${dbRounded} dB`,
               text: richText,
               files: [wavFile],
             });
@@ -1606,7 +1608,7 @@
           }
         }
 
-        // Desktop / fallback: copy rich text caption + download smartly named WAV
+        // Desktop / fallback: copy caption + download smartly named WAV
         copyTextToClipboard(richText);
         downloadClipWav(clipId, true);
         showToast('WAV downloaded & caption copied!');
@@ -1650,6 +1652,8 @@
         }
 
         await deleteClipFromDB(clipId);
+        recalculateStatsFromClips();
+        renderStats();
         renderHighlightReel();
         showToast('Clip deleted');
       }
@@ -1693,10 +1697,9 @@
           if (c.url) URL.revokeObjectURL(c.url);
         });
         state.clips = [];
-        state.stats = { totalFarts: 0, longestFart: 0, loudestFart: 0 };
         state.sortBy = 'newest';
 
-        saveStats();
+        recalculateStatsFromClips();
         await clearAllClipsFromDB();
 
         renderStats();
@@ -1812,11 +1815,12 @@
       // =========================================================================
       async function init() {
         loadLocalSettings();
-        renderStats();
         renderThresholdUI();
         resizeVisualizerCanvas();
 
         await loadClipsFromDB();
+        recalculateStatsFromClips();
+        renderStats();
         renderHighlightReel();
       }
 
