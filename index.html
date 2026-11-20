@@ -123,7 +123,10 @@
           </svg>
         </div>
         <div class="truncate">
-          <h1 class="text-xl font-extrabold tracking-tight leading-tight">FartCount</h1>
+          <div class="flex items-center gap-1.5">
+            <h1 class="text-xl font-extrabold tracking-tight leading-tight">FartCount</h1>
+            <span class="px-1.5 py-0.5 rounded-md text-[10px] font-bold tracking-wide bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">v0.2</span>
+          </div>
           <p class="text-[11px] font-medium text-slate-400">Acoustic Highlight Tracker</p>
         </div>
       </div>
@@ -296,24 +299,13 @@
         <!-- Play All / Stop Reel Button -->
         <button
           id="playAllBtn"
-          type="button"
-          disabled
-          class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md shadow-orange-500/20 hover:brightness-110 active:scale-95 disabled:opacity-35 disabled:pointer-events-none transition"
-        >
-          <svg id="playAllIcon" class="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M8 5.14v14l11-7-11-7z" />
-          </svg>
-          <svg id="stopAllIcon" class="hidden w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-            <rect x="6" y="6" width="12" height="12" rx="2" />
-          </svg>
-          <span id="playAllBtnText">Play All</span>
-        </button>
-      </div>
-
-      <!-- Sort Pills -->
-      <div id="sortBar" class="hidden flex items-center gap-1.5 mb-2.5">
+      <!-- Sort & Filter Pills -->
+      <div id="sortBar" class="hidden flex flex-wrap items-center gap-1.5 mb-2.5">
         <button type="button" data-sort="newest" class="sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition">
           Newest
+        </button>
+        <button type="button" data-sort="favorites" class="sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white/[0.06] text-slate-400 border border-white/10 hover:text-slate-200 transition">
+          ⭐ Favorites (<span id="favoritesCountText">0</span>)
         </button>
         <button type="button" data-sort="longest" class="sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white/[0.06] text-slate-400 border border-white/10 hover:text-slate-200 transition">
           🏆 Longest
@@ -325,7 +317,7 @@
 
       <!-- Scrollable Clips Container -->
       <div class="rounded-3xl bg-white/[0.05] backdrop-blur-xl border border-white/10 p-2.5 flex-1">
-        <!-- Friendly Empty State -->
+        <!-- Friendly Empty State (No Clips Yet) -->
         <div id="emptyReelState" class="py-8 px-4 text-center flex flex-col items-center">
           <div class="w-11 h-11 rounded-2xl bg-white/[0.06] border border-white/10 flex items-center justify-center text-xl mb-2.5">
             💨
@@ -333,6 +325,17 @@
           <p class="text-xs font-semibold text-slate-300 mb-1">No highlights captured yet</p>
           <p class="text-[11px] text-slate-500 max-w-[230px] leading-relaxed">
             Tap <span class="text-emerald-400 font-semibold">Record</span> and let it rip. Every fart is clipped to WAV and saved right here.
+          </p>
+        </div>
+
+        <!-- Friendly Empty Favorites State -->
+        <div id="emptyFavoritesState" class="hidden py-8 px-4 text-center flex flex-col items-center">
+          <div class="w-11 h-11 rounded-2xl bg-amber-500/10 border border-amber-400/20 flex items-center justify-center text-xl mb-2.5">
+            ⭐
+          </div>
+          <p class="text-xs font-semibold text-slate-300 mb-1">No favorite farts yet</p>
+          <p class="text-[11px] text-slate-500 max-w-[230px] leading-relaxed">
+            Tap the <span class="text-amber-400 font-semibold">star</span> on any clip in your Highlight Reel to save your all-time greats here.
           </p>
         </div>
 
@@ -350,7 +353,7 @@
     <div class="w-full max-w-xs rounded-3xl bg-[#161922] border border-white/15 p-5 shadow-2xl animate-popIn">
       <h3 class="text-base font-bold text-white mb-1.5">Reset FartCount?</h3>
       <p class="text-xs text-slate-400 leading-relaxed mb-5">
-        This will permanently clear your stats (Total, Longest, Loudest) and delete every audio clip in your Highlight Reel.
+        This will permanently clear your stats (Total, Longest, Loudest) and delete every saved clip and favorite in your Highlight Reel.
       </p>
       <div class="grid grid-cols-2 gap-2.5">
         <button
@@ -399,10 +402,11 @@
       const STORE_NAME = 'clips';
 
       const PRE_ROLL_SECONDS = 0.25;      // Rolling ~0.25s pre-roll so starts are never clipped
-      const POST_ROLL_TAIL_SECONDS = 0.16;// Crisp natural tail after silence begins
-      const MIN_FART_DURATION_MS = 150;   // 0.15s minimum to ignore sharp clicks/taps
-      const SILENCE_DEBOUNCE_MS = 350;    // 0.35s quiet window before finalizing clip
+      const POST_ROLL_TAIL_SECONDS = 0.30;// ~0.30s post-roll tail so even quick 0.05s pops are clearly audible
+      const MIN_FART_DURATION_MS = 50;    // 0.05s (50ms) minimum to catch quick squeakers & short pops
+      const SILENCE_DEBOUNCE_MS = 300;    // 0.30s quiet window before finalizing clip
       const REEL_GAP_MS = 350;            // Short pause between clips in "Play All" mode
+      const PCM_BUFFER_SIZE = 1024;       // ~23ms per chunk at 44.1kHz for fast transient detection
 
       // =========================================================================
       // Application State
@@ -414,127 +418,16 @@
           loudestFart: 0, // dB (0-100 scale)
         },
         thresholdDB: 65,
-        clips: [],        // Array of { id, timestamp, duration, peakDB, blob, url }
-        sortBy: 'newest', // 'newest' | 'longest' | 'loudest'
-
-        // Audio Capture Engine State
-        isRecording: false,
-        audioContext: null,
-        mediaStream: null,
-        sourceNode: null,
-        analyserNode: null,
-        processorNode: null,
-        silentGainNode: null,
-        sampleRate: 44100,
-
-        // Pre-roll Ring Buffer (array of Float32Array chunks)
-        preRollChunks: [],
-        preRollSamples: 0,
-
-        // Active Fart Event Capture State
-        isDetectingEvent: false,
-        eventStartTime: 0,
-        lastLoudTime: 0,
-        currentEventPeakDB: 0,
-        activeClipChunks: [],
-        activeClipSamples: 0,
-
-        // Live Meter & Visualizer State
-        latestDisplayDB: 0,
-        recordingStartTime: 0,
-        timerIntervalId: null,
-        rafVisualizerId: null,
-        barHistory: new Array(32).fill(4),
-
-        // Playback & Highlight Reel State
-        playingClipId: null,
-        isPlayingReel: false,
-        reelQueue: [],
-        reelGapTimer: null,
-        rafProgressId: null,
-      };
-
-      // =========================================================================
-      // DOM References
-      // =========================================================================
-      const els = {
-        errorBanner: document.getElementById('errorBanner'),
-        errorBannerText: document.getElementById('errorBannerText'),
-        statTotal: document.getElementById('statTotal'),
-        statLongest: document.getElementById('statLongest'),
-        statLoudest: document.getElementById('statLoudest'),
-        cardTotal: document.getElementById('cardTotal'),
-        cardLongest: document.getElementById('cardLongest'),
-        cardLoudest: document.getElementById('cardLoudest'),
-        meterCard: document.getElementById('meterCard'),
-        statusBadge: document.getElementById('statusBadge'),
-        statusDot: document.getElementById('statusDot'),
-        statusText: document.getElementById('statusText'),
-        liveDbValue: document.getElementById('liveDbValue'),
-        meterFill: document.getElementById('meterFill'),
-        thresholdMarker: document.getElementById('thresholdMarker'),
-        thresholdSlider: document.getElementById('thresholdSlider'),
-        thresholdValue: document.getElementById('thresholdValue'),
-        visualizerContainer: document.getElementById('visualizerContainer'),
-        visualizerCanvas: document.getElementById('visualizerCanvas'),
-        recordBtn: document.getElementById('recordBtn'),
-        recordPulseRing: document.getElementById('recordPulseRing'),
-        micIcon: document.getElementById('micIcon'),
-        stopIcon: document.getElementById('stopIcon'),
-        recordBtnLabel: document.getElementById('recordBtnLabel'),
-        recordTimer: document.getElementById('recordTimer'),
-        recordHint: document.getElementById('recordHint'),
-        shareBtn: document.getElementById('shareBtn'),
-        resetBtn: document.getElementById('resetBtn'),
-        reelCountBadge: document.getElementById('reelCountBadge'),
-        playAllBtn: document.getElementById('playAllBtn'),
-        playAllIcon: document.getElementById('playAllIcon'),
-        stopAllIcon: document.getElementById('stopAllIcon'),
+        clips: [],        // Array of { id, timestamp, duration, peakDB, starred, blob, url }
+        sortBy: 'newest', // 'newest' | 'favorites' | 'longest' | 'loudest'
+// ... existing code ... -->
         playAllBtnText: document.getElementById('playAllBtnText'),
         sortBar: document.getElementById('sortBar'),
+        favoritesCountText: document.getElementById('favoritesCountText'),
         emptyReelState: document.getElementById('emptyReelState'),
+        emptyFavoritesState: document.getElementById('emptyFavoritesState'),
         reelList: document.getElementById('reelList'),
-        clipAudioPlayer: document.getElementById('clipAudioPlayer'),
-        resetModal: document.getElementById('resetModal'),
-        cancelResetBtn: document.getElementById('cancelResetBtn'),
-        confirmResetBtn: document.getElementById('confirmResetBtn'),
-        toast: document.getElementById('toast'),
-      };
-
-      let toastTimeout = null;
-      let dbInstance = null;
-
-      // =========================================================================
-      // IndexedDB Storage Layer (Persists WAV Blobs across reloads on iPhone)
-      // =========================================================================
-      function openDatabase() {
-        return new Promise((resolve, reject) => {
-          if (dbInstance) {
-            resolve(dbInstance);
-            return;
-          }
-          if (!('indexedDB' in window)) {
-            reject(new Error('IndexedDB not supported'));
-            return;
-          }
-          const req = indexedDB.open(DB_NAME, DB_VERSION);
-          req.onupgradeneeded = (event) => {
-            const db = event.target.result;
-            if (!db.objectStoreNames.contains(STORE_NAME)) {
-              const store = db.createObjectStore(STORE_NAME, { keyPath: 'id' });
-              store.createIndex('timestamp', 'timestamp', { unique: false });
-            }
-          };
-          req.onsuccess = (event) => {
-            dbInstance = event.target.result;
-            resolve(dbInstance);
-          };
-          req.onerror = (event) => {
-            reject(event.target.error || new Error('Failed to open IndexedDB'));
-          };
-        });
-      }
-
+// ... existing code ... -->
       async function saveClipToDB(clipRecord) {
         try {
           const db = await openDatabase();
@@ -545,6 +438,7 @@
               timestamp: clipRecord.timestamp,
               duration: clipRecord.duration,
               peakDB: clipRecord.peakDB,
+              starred: Boolean(clipRecord.starred),
               blob: clipRecord.blob,
             });
             tx.oncomplete = () => resolve();
@@ -564,6 +458,7 @@
             req.onsuccess = () => {
               const items = (req.result || []).map((item) => ({
                 ...item,
+                starred: Boolean(item.starred),
                 url: item.blob ? URL.createObjectURL(item.blob) : '',
               }));
               // Sort newest first initially
@@ -577,244 +472,10 @@
           return [];
         }
       }
-
-      async function deleteClipFromDB(clipId) {
-        try {
-          const db = await openDatabase();
-          return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readwrite');
-            tx.objectStore(STORE_NAME).delete(clipId);
-            tx.oncomplete = () => resolve();
-            tx.onerror = (e) => reject(e.target.error);
-          });
-        } catch (err) {
-          console.warn('IndexedDB delete failed:', err);
-        }
-      }
-
-      async function clearAllClipsFromDB() {
-        try {
-          const db = await openDatabase();
-          return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readwrite');
-            tx.objectStore(STORE_NAME).clear();
-            tx.oncomplete = () => resolve();
-            tx.onerror = (e) => reject(e.target.error);
-          });
-        } catch (err) {
-          console.warn('IndexedDB clear failed:', err);
-        }
-      }
-
-      // =========================================================================
-      // localStorage Persistence for Stats & Threshold
-      // =========================================================================
-      function loadPersistedSettings() {
-        try {
-          const savedStats = localStorage.getItem(STORAGE_KEYS.STATS);
-          if (savedStats) {
-            const parsed = JSON.parse(savedStats);
-            state.stats.totalFarts = Number(parsed.totalFarts) || 0;
-            state.stats.longestFart = Number(parsed.longestFart) || 0;
-            state.stats.loudestFart = Number(parsed.loudestFart) || 0;
-          }
-
-          const savedThreshold = localStorage.getItem(STORAGE_KEYS.THRESHOLD);
-          if (savedThreshold !== null) {
-            const val = Number(savedThreshold);
-            if (!Number.isNaN(val) && val >= 35 && val <= 95) {
-              state.thresholdDB = val;
-            }
-          }
-        } catch (err) {
-          console.warn('Could not load saved settings:', err);
-        }
-      }
-
-      function savePersistedSettings() {
-        try {
-          localStorage.setItem(STORAGE_KEYS.STATS, JSON.stringify(state.stats));
-          localStorage.setItem(STORAGE_KEYS.THRESHOLD, String(state.thresholdDB));
-        } catch (err) {
-          console.warn('Could not save settings:', err);
-        }
-      }
-
-      // =========================================================================
-      // 16-bit Mono PCM to WAV Encoder (Universally Playable on iOS Safari)
-      // =========================================================================
-      function mergeFloat32Chunks(chunks, maxSamples) {
-        let totalLength = 0;
-        for (let i = 0; i < chunks.length; i++) {
-          totalLength += chunks[i].length;
-        }
-        const finalLength = maxSamples ? Math.min(totalLength, maxSamples) : totalLength;
-        const result = new Float32Array(finalLength);
-        let offset = 0;
-        for (let i = 0; i < chunks.length; i++) {
-          const chunk = chunks[i];
-          const remaining = finalLength - offset;
-          if (remaining <= 0) break;
-          if (chunk.length <= remaining) {
-            result.set(chunk, offset);
-            offset += chunk.length;
-          } else {
-            result.set(chunk.subarray(0, remaining), offset);
-            offset += remaining;
-            break;
-          }
-        }
-        return result;
-      }
-
-      function encodeMonoWAV(samples, sampleRate) {
-        const numChannels = 1;
-        const bitsPerSample = 16;
-        const bytesPerSample = bitsPerSample / 8;
-        const dataSize = samples.length * bytesPerSample;
-        const buffer = new ArrayBuffer(44 + dataSize);
-        const view = new DataView(buffer);
-
-        function writeString(offset, str) {
-          for (let i = 0; i < str.length; i++) {
-            view.setUint8(offset + i, str.charCodeAt(i));
-          }
-        }
-
-        // RIFF chunk descriptor
-        writeString(0, 'RIFF');
-        view.setUint32(4, 36 + dataSize, true);
-        writeString(8, 'WAVE');
-
-        // fmt sub-chunk
-        writeString(12, 'fmt ');
-        view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
-        view.setUint16(20, 1, true);  // AudioFormat (1 = PCM)
-        view.setUint16(22, numChannels, true);
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, sampleRate * numChannels * bytesPerSample, true); // ByteRate
-        view.setUint16(32, numChannels * bytesPerSample, true); // BlockAlign
-        view.setUint16(34, bitsPerSample, true);
-
-        // data sub-chunk
-        writeString(36, 'data');
-        view.setUint32(40, dataSize, true);
-
-        // Convert Float32 [-1, 1] PCM to Int16 little-endian
-        let offset = 44;
-        for (let i = 0; i < samples.length; i++) {
-          let s = Math.max(-1, Math.min(1, samples[i]));
-          const int16 = s < 0 ? s * 0x8000 : s * 0x7fff;
-          view.setInt16(offset, int16, true);
-          offset += 2;
-        }
-
-        return new Blob([buffer], { type: 'audio/wav' });
-      }
-
-      // =========================================================================
-      // UI Helpers, Toasts & Banners
-      // =========================================================================
-      function showToast(message) {
-        els.toast.textContent = message;
-        els.toast.classList.remove('opacity-0', 'translate-y-2');
-        els.toast.classList.add('opacity-100', 'translate-y-0');
-        clearTimeout(toastTimeout);
-        toastTimeout = setTimeout(() => {
-          els.toast.classList.add('opacity-0', 'translate-y-2');
-          els.toast.classList.remove('opacity-100', 'translate-y-0');
-        }, 2500);
-      }
-
-      function showError(message) {
-        els.errorBannerText.textContent = message;
-        els.errorBanner.classList.remove('hidden');
-      }
-
-      function hideError() {
-        els.errorBanner.classList.add('hidden');
-      }
-
-      function flashStatCard(cardEl, ringClass) {
-        cardEl.classList.add('ring-2', ringClass, 'scale-[1.03]');
-        setTimeout(() => {
-          cardEl.classList.remove('ring-2', ringClass, 'scale-[1.03]');
-        }, 650);
-      }
-
-      function renderStats() {
-        els.statTotal.textContent = String(state.stats.totalFarts);
-        els.statLongest.textContent = `${state.stats.longestFart.toFixed(2)}s`;
-        els.statLoudest.textContent = `${Math.round(state.stats.loudestFart)} dB`;
-      }
-
-      function renderThreshold() {
-        els.thresholdSlider.value = String(state.thresholdDB);
-        els.thresholdValue.textContent = `${state.thresholdDB} dB`;
-        els.thresholdMarker.style.left = `${state.thresholdDB}%`;
-      }
-
-      function formatTimestamp(isoString) {
-        try {
-          const d = new Date(isoString);
-          const now = new Date();
-          const isToday = d.toDateString() === now.toDateString();
-          const timeStr = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
-          if (isToday) return timeStr;
-          return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} • ${timeStr}`;
-        } catch {
-          return '';
-        }
-      }
-
-      function updateStatusUI(mode) {
-        if (mode === 'detecting') {
-          els.statusBadge.className = 'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-orange-500/25 text-orange-300 border border-orange-400/40 shadow-[0_0_16px_rgba(249,115,22,0.35)] transition-all';
-          els.statusDot.className = 'w-2 h-2 rounded-full bg-orange-400 animate-ping';
-          els.statusText.textContent = 'Fart Detected!';
-          els.meterCard.classList.add('border-orange-500/50', 'bg-orange-500/[0.08]');
-          els.meterCard.classList.remove('border-white/10');
-          els.meterFill.className = 'h-full rounded-full bg-gradient-to-r from-amber-500 to-orange-500 transition-[width] duration-75 ease-out';
-        } else if (mode === 'listening') {
-          els.statusBadge.className = 'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 transition-all';
-          els.statusDot.className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
-          els.statusText.textContent = 'Listening...';
-          els.meterCard.classList.remove('border-orange-500/50', 'bg-orange-500/[0.08]');
-          els.meterCard.classList.add('border-white/10');
-          els.meterFill.className = 'h-full rounded-full bg-gradient-to-r from-emerald-500 to-green-400 transition-[width] duration-75 ease-out';
-        } else {
-          els.statusBadge.className = 'inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-white/10 text-slate-300 transition-all';
-          els.statusDot.className = 'w-2 h-2 rounded-full bg-slate-400';
-          els.statusText.textContent = 'Ready';
-          els.meterCard.classList.remove('border-orange-500/50', 'bg-orange-500/[0.08]');
-          els.meterCard.classList.add('border-white/10');
-          els.meterFill.className = 'h-full rounded-full bg-gradient-to-r from-emerald-500 to-green-400 transition-[width] duration-75 ease-out';
-        }
-      }
-
-      function updateRecordButtonUI(recording) {
-        if (recording) {
-          els.recordBtn.className = 'relative z-10 w-32 h-32 rounded-full bg-gradient-to-b from-rose-500 to-red-600 shadow-[0_12px_35px_rgba(244,63,94,0.45)] border-4 border-white/25 flex flex-col items-center justify-center gap-1 active:scale-95 transition-all duration-200 select-none';
-          els.recordPulseRing.classList.remove('hidden');
-          els.micIcon.classList.add('hidden');
-          els.stopIcon.classList.remove('hidden');
-          els.recordBtnLabel.textContent = 'Stop';
-          els.recordTimer.classList.remove('hidden');
-          els.recordHint.textContent = 'Listening live — clips appear below automatically';
-        } else {
-          els.recordBtn.className = 'relative z-10 w-32 h-32 rounded-full bg-gradient-to-b from-emerald-400 to-green-600 shadow-[0_12px_35px_rgba(16,185,129,0.4)] border-4 border-white/20 flex flex-col items-center justify-center gap-1 active:scale-95 transition-all duration-200 select-none';
-          els.recordPulseRing.classList.add('hidden');
-          els.micIcon.classList.remove('hidden');
-          els.stopIcon.classList.add('hidden');
-          els.recordBtnLabel.textContent = 'Record';
-          els.recordTimer.classList.add('hidden');
-          els.recordTimer.textContent = '00:00';
-          els.recordHint.textContent = 'Captures each fart automatically into your Highlight Reel';
-        }
-      }
-
+// ... existing code ... -->
       function updatePlayAllButtonUI() {
-        els.playAllBtn.disabled = state.clips.length === 0;
+        const visibleClips = getSortedClips();
+        els.playAllBtn.disabled = visibleClips.length === 0;
         if (state.isPlayingReel) {
           els.playAllIcon.classList.add('hidden');
           els.stopAllIcon.classList.remove('hidden');
@@ -823,103 +484,11 @@
         } else {
           els.playAllIcon.classList.remove('hidden');
           els.stopAllIcon.classList.add('hidden');
-          els.playAllBtnText.textContent = 'Play All';
+          els.playAllBtnText.textContent = state.sortBy === 'favorites' ? 'Play Favorites' : 'Play All';
           els.playAllBtn.className = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-gradient-to-r from-orange-500 to-amber-500 text-white shadow-md shadow-orange-500/20 hover:brightness-110 active:scale-95 disabled:opacity-35 disabled:pointer-events-none transition';
         }
       }
-
-      // =========================================================================
-      // Responsive Canvas Visualizer
-      // =========================================================================
-      function resizeVisualizerCanvas() {
-        const rect = els.visualizerContainer.getBoundingClientRect();
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
-        els.visualizerCanvas.width = Math.max(1, Math.floor(rect.width * dpr));
-        els.visualizerCanvas.height = Math.max(1, Math.floor(rect.height * dpr));
-        drawVisualizerFrame();
-      }
-
-      function drawVisualizerFrame() {
-        const canvas = els.visualizerCanvas;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        const w = canvas.width;
-        const h = canvas.height;
-        ctx.clearRect(0, 0, w, h);
-
-        // Threshold dashed line
-        const threshY = h - (state.thresholdDB / 100) * h;
-        ctx.save();
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
-        ctx.setLineDash([4, 4]);
-        ctx.lineWidth = Math.max(1, window.devicePixelRatio || 1);
-        ctx.beginPath();
-        ctx.moveTo(0, threshY);
-        ctx.lineTo(w, threshY);
-        ctx.stroke();
-        ctx.restore();
-
-        if (state.isRecording) {
-          state.barHistory.shift();
-          state.barHistory.push(Math.max(4, state.latestDisplayDB));
-        } else {
-          for (let i = 0; i < state.barHistory.length; i++) {
-            state.barHistory[i] = Math.max(4, state.barHistory[i] * 0.86);
-          }
-        }
-
-        const count = state.barHistory.length;
-        const gap = w * 0.012;
-        const barWidth = (w - gap * (count + 1)) / count;
-
-        for (let i = 0; i < count; i++) {
-          const val = state.barHistory[i];
-          const barHeight = Math.max(h * 0.09, (val / 100) * (h * 0.88));
-          const x = gap + i * (barWidth + gap);
-          const y = (h - barHeight) / 2;
-
-          if (val >= state.thresholdDB || (state.isDetectingEvent && i === count - 1)) {
-            ctx.fillStyle = '#FB923C'; // Vibrant orange
-          } else if (state.isRecording) {
-            ctx.fillStyle = '#34D399'; // Vibrant emerald
-          } else {
-            ctx.fillStyle = 'rgba(148, 163, 184, 0.32)';
-          }
-
-          const radius = Math.min(barWidth / 2, barHeight / 2);
-          ctx.beginPath();
-          if (ctx.roundRect) {
-            ctx.roundRect(x, y, barWidth, barHeight, radius);
-          } else {
-            ctx.rect(x, y, barWidth, barHeight);
-          }
-          ctx.fill();
-        }
-      }
-
-      function visualizerLoop() {
-        if (!state.isRecording) return;
-        els.liveDbValue.textContent = String(Math.round(state.latestDisplayDB));
-        els.meterFill.style.width = `${state.latestDisplayDB.toFixed(1)}%`;
-        drawVisualizerFrame();
-        state.rafVisualizerId = requestAnimationFrame(visualizerLoop);
-      }
-
-      // =========================================================================
-      // PCM Capture Engine & Real-Time Fart Event Detector
-      // =========================================================================
-      function pushToPreRoll(chunkCopy) {
-        const maxPreRollSamples = Math.ceil(state.sampleRate * PRE_ROLL_SECONDS);
-        state.preRollChunks.push(chunkCopy);
-        state.preRollSamples += chunkCopy.length;
-
-        while (state.preRollSamples > maxPreRollSamples && state.preRollChunks.length > 1) {
-          const removed = state.preRollChunks.shift();
-          state.preRollSamples -= removed.length;
-        }
-      }
-
+// ... existing code ... -->
       function handleAudioProcess(audioProcessingEvent) {
         if (!state.isRecording) return;
 
@@ -930,30 +499,26 @@
         const chunkCopy = new Float32Array(inputData.length);
         chunkCopy.set(inputData);
 
-        // Compute RMS & peak amplitude for accurate acoustic level
-        let sumSquares = 0;
+        // Fast transient peak sample detection directly inside the ~23ms PCM callback
         let peakAmp = 0;
         for (let i = 0; i < chunkCopy.length; i++) {
-          const s = chunkCopy[i];
-          sumSquares += s * s;
-          const abs = Math.abs(s);
+          const abs = Math.abs(chunkCopy[i]);
           if (abs > peakAmp) peakAmp = abs;
         }
-        const rms = Math.sqrt(sumSquares / chunkCopy.length);
-        const level = Math.max(rms, peakAmp * 0.65);
-        const rawDb = level > 0.00001 ? 20 * Math.log10(level) + 100 : 0;
+        const rawDb = peakAmp > 0.00001 ? 20 * Math.log10(peakAmp) + 100 : 0;
         const displayDB = Math.max(0, Math.min(100, rawDb));
 
         state.latestDisplayDB = displayDB;
 
         const now = performance.now();
+        const chunkDurationMs = (chunkCopy.length / state.sampleRate) * 1000;
 
         if (displayDB >= state.thresholdDB) {
           if (!state.isDetectingEvent) {
             // Start a new fart event! Seed with rolling ~0.25s pre-roll buffer
             state.isDetectingEvent = true;
             state.eventStartTime = now;
-            state.lastLoudTime = now;
+            state.lastLoudTime = now + chunkDurationMs;
             state.currentEventPeakDB = displayDB;
 
             state.activeClipChunks = state.preRollChunks.slice();
@@ -964,7 +529,7 @@
             updateStatusUI('detecting');
           } else {
             state.currentEventPeakDB = Math.max(state.currentEventPeakDB, displayDB);
-            state.lastLoudTime = now;
+            state.lastLoudTime = now + chunkDurationMs;
             state.activeClipChunks.push(chunkCopy);
             state.activeClipSamples += chunkCopy.length;
           }
@@ -986,7 +551,7 @@
       }
 
       async function finalizeFartClip() {
-        const durationMs = state.lastLoudTime - state.eventStartTime;
+        const durationMs = Math.max(0, state.lastLoudTime - state.eventStartTime);
         const peakDB = state.currentEventPeakDB;
         const chunksToEncode = state.activeClipChunks;
         const sampleRate = state.sampleRate;
@@ -999,14 +564,14 @@
         state.activeClipChunks = [];
         state.activeClipSamples = 0;
 
-        // Filter out sharp clicks/taps under 0.15s
+        // Filter out ultra-brief clicks/taps under 0.05s (50ms)
         if (durationMs < MIN_FART_DURATION_MS || chunksToEncode.length === 0) {
           return;
         }
 
         const durationSec = durationMs / 1000;
 
-        // Trim extra trailing silence beyond our crisp post-roll tail
+        // Trim extra trailing silence beyond our ~0.30s post-roll tail
         const desiredSeconds = PRE_ROLL_SECONDS + durationSec + POST_ROLL_TAIL_SECONDS;
         const maxSamples = Math.ceil(desiredSeconds * sampleRate);
         const mergedPCM = mergeFloat32Chunks(chunksToEncode, maxSamples);
@@ -1018,192 +583,26 @@
           timestamp: new Date().toISOString(),
           duration: durationSec,
           peakDB: peakDB,
+          starred: false,
           blob: wavBlob,
           url: clipUrl,
         };
-
-        // Update Stats
-        let isNewRecord = false;
-        state.stats.totalFarts += 1;
-        flashStatCard(els.cardTotal, 'ring-emerald-400');
-
-        if (durationSec > state.stats.longestFart) {
-          state.stats.longestFart = durationSec;
-          isNewRecord = true;
-          flashStatCard(els.cardLongest, 'ring-sky-400');
-        }
-        if (peakDB > state.stats.loudestFart) {
-          state.stats.loudestFart = peakDB;
-          isNewRecord = true;
-          flashStatCard(els.cardLoudest, 'ring-orange-400');
-        }
-
-        // Save to localStorage & IndexedDB, and pop into Highlight Reel in real time!
-        state.clips.unshift(newClip);
-        savePersistedSettings();
-        saveClipToDB(newClip);
-
-        renderStats();
-        renderHighlightReel(newClip.id);
-
-        if (isNewRecord) {
-          showToast(`New Record! ${durationSec.toFixed(2)}s • ${Math.round(peakDB)} dB`);
-        } else {
-          showToast(`Clip saved (${durationSec.toFixed(2)}s • ${Math.round(peakDB)} dB)`);
-        }
-      }
-
-      async function startRecording() {
-        hideError();
-        stopAllPlayback();
-
-        if (!window.isSecureContext) {
-          showError('Microphone access requires HTTPS (or localhost). Host this file on Netlify, Vercel, or GitHub Pages to use it on your iPhone.');
-          return;
-        }
-
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          showError('Your browser does not support microphone capture. Try opening FartCount in iOS Safari or Chrome.');
-          return;
-        }
-
-        try {
-          // iOS Safari requirement: Create/resume AudioContext directly inside the tap gesture
-          const AudioCtx = window.AudioContext || window.webkitAudioContext;
-          if (!state.audioContext || state.audioContext.state === 'closed') {
-            state.audioContext = new AudioCtx();
-          }
-          if (state.audioContext.state === 'suspended') {
-            await state.audioContext.resume();
-          }
-          state.sampleRate = state.audioContext.sampleRate || 44100;
-
-          // Request microphone stream
-          let stream;
-          try {
-            stream = await navigator.mediaDevices.getUserMedia({
-              audio: {
-                echoCancellation: false,
-                noiseSuppression: false,
-                autoGainControl: false,
-              },
-            });
-          } catch {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          }
-
-          state.mediaStream = stream;
-
-          // Build Web Audio graph: Source -> ScriptProcessor -> SilentGain (0) -> Destination
+// ... existing code ... -->
+          // Build Web Audio graph: Source -> ScriptProcessor (1024 samples ~23ms) -> SilentGain (0) -> Destination
           const source = state.audioContext.createMediaStreamSource(stream);
-          const processor = state.audioContext.createScriptProcessor(2048, 1, 1);
+          const processor = state.audioContext.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
           const silentGain = state.audioContext.createGain();
           silentGain.gain.value = 0;
-
-          processor.onaudioprocess = handleAudioProcess;
-
-          source.connect(processor);
-          processor.connect(silentGain);
-          silentGain.connect(state.audioContext.destination);
-
-          state.sourceNode = source;
-          state.processorNode = processor;
-          state.silentGainNode = silentGain;
-
-          // Reset rolling buffers & timers
-          state.preRollChunks = [];
-          state.preRollSamples = 0;
-          state.isDetectingEvent = false;
-          state.activeClipChunks = [];
-          state.activeClipSamples = 0;
-          state.latestDisplayDB = 0;
-
-          state.isRecording = true;
-          state.recordingStartTime = performance.now();
-
-          updateRecordButtonUI(true);
-          updateStatusUI('listening');
-
-          clearInterval(state.timerIntervalId);
-          state.timerIntervalId = setInterval(() => {
-            const elapsedSec = Math.floor((performance.now() - state.recordingStartTime) / 1000);
-            const mins = String(Math.floor(elapsedSec / 60)).padStart(2, '0');
-            const secs = String(elapsedSec % 60).padStart(2, '0');
-            els.recordTimer.textContent = `${mins}:${secs}`;
-          }, 250);
-
-          visualizerLoop();
-        } catch (err) {
-          console.error('Microphone error:', err);
-          if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-            showError('Microphone access denied. On iPhone Safari, tap "aA" in the address bar → Website Settings → Microphone → Allow.');
-          } else if (err.name === 'NotFoundError') {
-            showError('No microphone found on this device.');
-          } else {
-            showError(`Could not start microphone: ${err.message || 'Unknown error'}`);
-          }
-          cleanupCaptureResources();
-        }
-      }
-
-      function stopRecording() {
-        if (!state.isRecording) return;
-
-        // Finalize any in-progress fart before shutting down mic
-        if (state.isDetectingEvent) {
-          finalizeFartClip();
-        }
-
-        state.isRecording = false;
-        cancelAnimationFrame(state.rafVisualizerId);
-        clearInterval(state.timerIntervalId);
-
-        cleanupCaptureResources();
-
-        state.latestDisplayDB = 0;
-        els.liveDbValue.textContent = '0';
-        els.meterFill.style.width = '0%';
-        updateStatusUI('ready');
-        updateRecordButtonUI(false);
-        drawVisualizerFrame();
-      }
-
-      function cleanupCaptureResources() {
-        // Disconnect Web Audio nodes
-        if (state.processorNode) {
-          state.processorNode.onaudioprocess = null;
-          try { state.processorNode.disconnect(); } catch (_) {}
-          state.processorNode = null;
-        }
-        if (state.sourceNode) {
-          try { state.sourceNode.disconnect(); } catch (_) {}
-          state.sourceNode = null;
-        }
-        if (state.silentGainNode) {
-          try { state.silentGainNode.disconnect(); } catch (_) {}
-          state.silentGainNode = null;
-        }
-
-        // Stop all MediaStream tracks so iOS Safari switches audio output back to loudspeaker
-        if (state.mediaStream) {
-          state.mediaStream.getTracks().forEach((track) => {
-            try { track.stop(); } catch (_) {}
-          });
-          state.mediaStream = null;
-        }
-
-        // Suspend AudioContext to free audio session on iOS
-        if (state.audioContext && state.audioContext.state === 'running') {
-          state.audioContext.suspend().catch(() => {});
-        }
-      }
-
+// ... existing code ... -->
       // =========================================================================
-      // Highlight Reel Rendering, Record Badges & Sorting
+      // Highlight Reel Rendering, Record Badges, Favorites & Sorting
       // =========================================================================
       function getSortedClips() {
-        const list = state.clips.slice();
-        if (state.sortBy === 'longest') {
+        let list = state.clips.slice();
+        if (state.sortBy === 'favorites') {
+          list = list.filter((c) => c.starred);
+          list.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        } else if (state.sortBy === 'longest') {
           list.sort((a, b) => b.duration - a.duration);
         } else if (state.sortBy === 'loudest') {
           list.sort((a, b) => b.peakDB - a.peakDB);
@@ -1226,11 +625,16 @@
       }
 
       function renderHighlightReel(newlyAddedId = null) {
+        const starredCount = state.clips.filter((c) => c.starred).length;
         els.reelCountBadge.textContent = String(state.clips.length);
+        if (els.favoritesCountText) {
+          els.favoritesCountText.textContent = String(starredCount);
+        }
         updatePlayAllButtonUI();
 
         if (state.clips.length === 0) {
           els.emptyReelState.classList.remove('hidden');
+          els.emptyFavoritesState.classList.add('hidden');
           els.sortBar.classList.add('hidden');
           els.reelList.innerHTML = '';
           return;
@@ -1242,11 +646,20 @@
         const { longestId, loudestId } = getRecordHolderIds();
         const sortedClips = getSortedClips();
 
+        if (state.sortBy === 'favorites' && sortedClips.length === 0) {
+          els.emptyFavoritesState.classList.remove('hidden');
+          els.reelList.innerHTML = '';
+          return;
+        }
+
+        els.emptyFavoritesState.classList.add('hidden');
+
         els.reelList.innerHTML = sortedClips
           .map((clip) => {
             const isPlaying = state.playingClipId === clip.id;
             const isLongest = clip.id === longestId;
             const isLoudest = clip.id === loudestId;
+            const isStarred = Boolean(clip.starred);
             const isNewClass = clip.id === newlyAddedId ? 'animate-popIn' : '';
 
             const badges = [
@@ -1262,6 +675,8 @@
 
             const activeCardStyle = isPlaying
               ? 'border-emerald-400/50 bg-emerald-500/[0.10] shadow-[0_0_20px_rgba(16,185,129,0.12)]'
+              : isStarred
+              ? 'border-amber-400/25 bg-amber-500/[0.05] hover:bg-amber-500/[0.08]'
               : 'border-white/[0.08] bg-white/[0.04] hover:bg-white/[0.07]';
 
             const playBtnStyle = isPlaying
@@ -1272,12 +687,20 @@
               ? `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1.2"/><rect x="14" y="5" width="4" height="14" rx="1.2"/></svg>`
               : `<svg class="w-4 h-4 translate-x-[1px]" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5.14v14l11-7-11-7z"/></svg>`;
 
+            const starBtnStyle = isStarred
+              ? 'bg-amber-500/20 text-amber-400 border border-amber-400/40 shadow-[0_0_12px_rgba(251,191,36,0.3)]'
+              : 'bg-white/[0.06] text-slate-400 hover:bg-amber-500/15 hover:text-amber-300';
+
+            const starIconSvg = isStarred
+              ? `<svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z" /></svg>`
+              : `<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M11.48 3.499a.562.562 0 011.04 0l2.125 5.111a.563.563 0 00.475.345l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 00-.182.557l1.285 5.385a.562.562 0 01-.84.61l-4.725-2.885a.563.563 0 00-.586 0L6.982 20.54a.562.562 0 01-.84-.61l1.285-5.386a.562.562 0 00-.182-.557l-4.204-3.602a.563.563 0 01.321-.988l5.518-.442a.563.563 0 00.475-.345L11.48 3.5z" /></svg>`;
+
             return `
               <li
                 data-clip-id="${clip.id}"
                 class="${isNewClass} rounded-2xl border p-2.5 transition-all duration-200 ${activeCardStyle}"
               >
-                <div class="flex items-center gap-2.5">
+                <div class="flex items-center gap-2">
                   <!-- Play / Pause Button -->
                   <button
                     type="button"
@@ -1309,8 +732,19 @@
                     </div>
                   </div>
 
-                  <!-- Save WAV & Delete Actions -->
+                  <!-- Star, Save WAV & Delete Actions -->
                   <div class="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      data-action="star"
+                      data-clip-id="${clip.id}"
+                      aria-label="${isStarred ? 'Remove from favorites' : 'Add to favorites'}"
+                      title="${isStarred ? 'Unstar favorite' : 'Star favorite'}"
+                      class="w-9 h-9 rounded-xl active:scale-90 flex items-center justify-center transition ${starBtnStyle}"
+                    >
+                      ${starIconSvg}
+                    </button>
+
                     <button
                       type="button"
                       data-action="download"
@@ -1343,82 +777,19 @@
           })
           .join('');
       }
-
-      // =========================================================================
-      // Clip Playback & Sequential "Play All" Reel Engine
-      // =========================================================================
-      function updateClipProgressLoop() {
-        if (!state.playingClipId) return;
-        const audio = els.clipAudioPlayer;
-        const bar = els.reelList.querySelector(`[data-progress-id="${state.playingClipId}"]`);
-        if (bar && audio.duration && isFinite(audio.duration) && audio.duration > 0) {
-          const pct = Math.min(100, (audio.currentTime / audio.duration) * 100);
-          bar.style.width = `${pct.toFixed(1)}%`;
-        }
-        if (!audio.paused && !audio.ended) {
-          state.rafProgressId = requestAnimationFrame(updateClipProgressLoop);
-        }
-      }
-
-      async function playClipById(clipId, fromReel = false) {
-        const clip = state.clips.find((c) => c.id === clipId);
-        if (!clip || !clip.url) return;
-
-        // If user taps Play while recording, automatically stop recording first so iOS routes to loudspeaker
-        if (state.isRecording) {
-          stopRecording();
-        }
-
-        // If tapping the currently playing clip (and not advancing reel), pause/stop it
-        if (!fromReel && state.playingClipId === clipId) {
-          stopAllPlayback();
-          return;
-        }
-
-        if (!fromReel) {
-          state.isPlayingReel = false;
-          state.reelQueue = [];
-          clearTimeout(state.reelGapTimer);
-        }
-
-        cancelAnimationFrame(state.rafProgressId);
-        state.playingClipId = clipId;
-        renderHighlightReel();
-
-        // Scroll active clip gently into view during Play All
-        if (fromReel) {
-          const cardEl = els.reelList.querySelector(`li[data-clip-id="${clipId}"]`);
-          if (cardEl && cardEl.scrollIntoView) {
-            cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          }
-        }
-
-        try {
-          const audio = els.clipAudioPlayer;
-          audio.pause();
-          audio.src = clip.url;
-          audio.currentTime = 0;
-          await audio.play();
-          updateClipProgressLoop();
-        } catch (err) {
-          console.error('Clip playback failed:', err);
-          showToast('Could not play clip on this device.');
-          stopAllPlayback();
-        }
-      }
-
+// ... existing code ... -->
       function togglePlayAllReel() {
         if (state.isPlayingReel) {
           stopAllPlayback();
           return;
         }
-        if (state.clips.length === 0) return;
+        const ordered = getSortedClips();
+        if (ordered.length === 0) return;
 
         if (state.isRecording) {
           stopRecording();
         }
 
-        const ordered = getSortedClips();
         state.isPlayingReel = true;
         state.reelQueue = ordered.map((c) => c.id);
         updatePlayAllButtonUI();
@@ -1428,193 +799,23 @@
           playClipById(firstId, true);
         }
       }
-
-      function stopAllPlayback() {
-        clearTimeout(state.reelGapTimer);
-        cancelAnimationFrame(state.rafProgressId);
-
-        const audio = els.clipAudioPlayer;
-        if (!audio.paused) {
-          audio.pause();
-        }
-        audio.currentTime = 0;
-
-        state.playingClipId = null;
-        state.isPlayingReel = false;
-        state.reelQueue = [];
-        renderHighlightReel();
-      }
-
-      // Handle audio ended (advance reel if in Play All mode)
-      els.clipAudioPlayer.addEventListener('ended', () => {
-        cancelAnimationFrame(state.rafProgressId);
-        const finishedId = state.playingClipId;
-        const bar = finishedId
-          ? els.reelList.querySelector(`[data-progress-id="${finishedId}"]`)
-          : null;
-        if (bar) bar.style.width = '100%';
-
-        if (state.isPlayingReel && state.reelQueue.length > 0) {
-          const nextId = state.reelQueue.shift();
-          state.reelGapTimer = setTimeout(() => {
-            if (state.isPlayingReel) {
-              playClipById(nextId, true);
-            }
-          }, REEL_GAP_MS);
-        } else {
-          state.playingClipId = null;
-          state.isPlayingReel = false;
-          state.reelQueue = [];
-          renderHighlightReel();
-        }
-      });
-
+// ... existing code ... -->
       // =========================================================================
-      // Clip Download (Save WAV) & Delete Actions
+      // Clip Star (Favorite), Download (Save WAV) & Delete Actions
       // =========================================================================
-      function downloadClipWav(clipId) {
+      async function toggleClipStar(clipId) {
         const clip = state.clips.find((c) => c.id === clipId);
-        if (!clip || !clip.url) return;
+        if (!clip) return;
 
-        const safeTime = new Date(clip.timestamp)
-          .toISOString()
-          .replace(/[:.]/g, '-')
-          .slice(0, 19);
-        const filename = `FartCount_${safeTime}_${clip.duration.toFixed(2)}s_${Math.round(clip.peakDB)}dB.wav`;
-
-        const a = document.createElement('a');
-        a.href = clip.url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        showToast('Downloading WAV clip...');
-      }
-
-      async function deleteClip(clipId) {
-        if (state.playingClipId === clipId) {
-          stopAllPlayback();
-        }
-        const idx = state.clips.findIndex((c) => c.id === clipId);
-        if (idx === -1) return;
-
-        const [removed] = state.clips.splice(idx, 1);
-        if (removed.url) {
-          URL.revokeObjectURL(removed.url);
-        }
-
-        await deleteClipFromDB(clipId);
+        clip.starred = !clip.starred;
+        await saveClipToDB(clip);
         renderHighlightReel();
-        showToast('Clip deleted.');
+        showToast(clip.starred ? 'Saved to Favorites ⭐' : 'Removed from Favorites');
       }
 
-      // =========================================================================
-      // Share Score (Web Share API + Clipboard Fallback)
-      // =========================================================================
-      async function shareScore() {
-        const summary = [
-          '💨 My FartCount Records:',
-          `• Total Farts: ${state.stats.totalFarts}`,
-          `• Longest: ${state.stats.longestFart.toFixed(2)}s`,
-          `• Loudest: ${Math.round(state.stats.loudestFart)} dB`,
-          `• Highlight Reel: ${state.clips.length} saved clip${state.clips.length === 1 ? '' : 's'}`,
-          'Can you beat my score?',
-        ].join('\n');
-
-        if (navigator.share) {
-          try {
-            await navigator.share({
-              title: 'FartCount Score',
-              text: summary,
-            });
-            return;
-          } catch (err) {
-            if (err && err.name === 'AbortError') return;
-          }
-        }
-
-        // Clipboard fallback via execCommand('copy')
-        try {
-          const textarea = document.createElement('textarea');
-          textarea.value = summary;
-          textarea.setAttribute('readonly', '');
-          textarea.style.position = 'fixed';
-          textarea.style.top = '-9999px';
-          document.body.appendChild(textarea);
-          textarea.select();
-          textarea.setSelectionRange(0, summary.length);
-          const ok = document.execCommand('copy');
-          document.body.removeChild(textarea);
-          showToast(ok ? 'Score copied to clipboard!' : 'Could not copy score.');
-        } catch {
-          showToast('Could not copy score.');
-        }
-      }
-
-      // =========================================================================
-      // Reset Confirmation Modal
-      // =========================================================================
-      function openResetModal() {
-        els.resetModal.classList.remove('hidden');
-      }
-
-      function closeResetModal() {
-        els.resetModal.classList.add('hidden');
-      }
-
-      async function confirmResetAll() {
-        stopRecording();
-        stopAllPlayback();
-
-        // Revoke all Blob URLs
-        state.clips.forEach((c) => {
-          if (c.url) URL.revokeObjectURL(c.url);
-        });
-        state.clips = [];
-
-        state.stats.totalFarts = 0;
-        state.stats.longestFart = 0;
-        state.stats.loudestFart = 0;
-
-        savePersistedSettings();
-        await clearAllClipsFromDB();
-
-        renderStats();
-        renderHighlightReel();
-        closeResetModal();
-        showToast('Stats and Highlight Reel cleared.');
-      }
-
-      // =========================================================================
-      // Event Listeners & Bootstrapping
-      // =========================================================================
-      els.recordBtn.addEventListener('click', () => {
-        if (state.isRecording) {
-          stopRecording();
-        } else {
-          startRecording();
-        }
-      });
-
-      els.playAllBtn.addEventListener('click', togglePlayAllReel);
-      els.shareBtn.addEventListener('click', shareScore);
-      els.resetBtn.addEventListener('click', openResetModal);
-      els.cancelResetBtn.addEventListener('click', closeResetModal);
-      els.confirmResetBtn.addEventListener('click', confirmResetAll);
-      els.resetModal.addEventListener('click', (e) => {
-        if (e.target === els.resetModal) closeResetModal();
-      });
-
-      els.thresholdSlider.addEventListener('input', (e) => {
-        state.thresholdDB = Number(e.target.value);
-        renderThreshold();
-        savePersistedSettings();
-        if (!state.isRecording) {
-          drawVisualizerFrame();
-        }
-      });
-
-      // Delegated events for Highlight Reel clip cards (Play, Download, Delete)
+      function downloadClipWav(clipId) {
+// ... existing code ... -->
+      // Delegated events for Highlight Reel clip cards (Play, Star, Download, Delete)
       els.reelList.addEventListener('click', (e) => {
         const btn = e.target.closest('button[data-action]');
         if (!btn) return;
@@ -1624,6 +825,8 @@
 
         if (action === 'play') {
           playClipById(clipId, false);
+        } else if (action === 'star') {
+          toggleClipStar(clipId);
         } else if (action === 'download') {
           downloadClipWav(clipId);
         } else if (action === 'delete') {
@@ -1631,7 +834,7 @@
         }
       });
 
-      // Sort pills
+      // Sort & Filter pills
       els.sortBar.addEventListener('click', (e) => {
         const pill = e.target.closest('.sort-pill');
         if (!pill) return;
@@ -1639,39 +842,15 @@
 
         els.sortBar.querySelectorAll('.sort-pill').forEach((el) => {
           const active = el.dataset.sort === state.sortBy;
-          el.className = active
-            ? 'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition'
-            : 'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white/[0.06] text-slate-400 border border-white/10 hover:text-slate-200 transition';
+          if (active && el.dataset.sort === 'favorites') {
+            el.className = 'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-amber-500/20 text-amber-300 border border-amber-400/35 transition';
+          } else if (active) {
+            el.className = 'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition';
+          } else {
+            el.className = 'sort-pill px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-white/[0.06] text-slate-400 border border-white/10 hover:text-slate-200 transition';
+          }
         });
 
         renderHighlightReel();
       });
-
-      window.addEventListener('resize', resizeVisualizerCanvas);
-
-      document.addEventListener('visibilitychange', () => {
-        if (document.hidden && state.isRecording) {
-          stopRecording();
-        }
-      });
-
-      // Initialize app on load
-      async function init() {
-        loadPersistedSettings();
-        renderStats();
-        renderThreshold();
-        resizeVisualizerCanvas();
-
-        state.clips = await loadClipsFromDB();
-        renderHighlightReel();
-
-        if (!window.isSecureContext) {
-          showError('Tip: Live microphone access requires HTTPS. Host this file on Netlify Drop, Vercel, or GitHub Pages to use it on your iPhone.');
-        }
-      }
-
-      init();
-    })();
-  </script>
-</body>
-</html>
+// ... existing code ... -->
